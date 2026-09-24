@@ -15,6 +15,7 @@ import { join } from "node:path";
 import type { Bot } from "grammy";
 import { GrammyError, HttpError } from "grammy";
 import { GrokClient } from "./grok/client.js";
+import { GrokPool } from "./grok/pool.js";
 import { createBot } from "./bot/bot.js";
 import { CANONICAL_DIR, loadConfig } from "./config.js";
 import { InstanceLock } from "./app/instance-lock.js";
@@ -137,25 +138,28 @@ async function main(): Promise<void> {
     scream(`\u26A0\uFE0F unhandledRejection (staying up): ${msg}`);
   });
 
-  const grok = new GrokClient({
-    grokCliPath: cfg.grokCliPath,
+  const pool = new GrokPool(
+    {
+      grokCliPath: cfg.grokCliPath,
     workspace: cfg.workspace,
     sessionsDir: cfg.sessionsDir,
     trustAllTools: cfg.trustAllTools,
     apiKey: cfg.grokApiKey,
     model: cfg.grokModel,
+    reasoningEffort: cfg.reasoningEffort,
     autoRestart: cfg.grokAutoRestart,
     promptIdleTimeoutMs: cfg.promptIdleMs,
     sandboxProfile: cfg.sandboxProfile,
     grokMemory: cfg.grokMemory,
     agentProfile: cfg.agentProfile,
     pluginDir: cfg.pluginDir,
-  });
+    },
+  );
 
   // Retry ACP connect — agent crash at boot should not kill the Telegram bot.
   for (let attempt = 1; ; attempt++) {
     try {
-      await grok.start();
+      await pool.start();
       break;
     } catch (e) {
       const wait = Math.min(60_000, 1000 * 2 ** Math.min(attempt, 5));
@@ -172,7 +176,7 @@ async function main(): Promise<void> {
   let updater: Awaited<ReturnType<typeof createBot>>["updater"];
   for (let attempt = 1; ; attempt++) {
     try {
-      const bundle = await createBot(cfg, grok);
+      const bundle = await createBot(cfg, pool);
       bot = bundle.bot;
       registry = bundle.registry;
       scheduler = bundle.scheduler;
@@ -211,12 +215,12 @@ async function main(): Promise<void> {
       /* ignore */
     }
     void bot!.stop().catch(() => {});
-    grok.stop();
+    pool.stop();
     lock.release();
     setTimeout(() => process.exit(code), 500);
   };
 
-  grok.on("restarted", () => log.info("Grok bridge re-bound; sessions continue on next message."));
+  pool.on("restarted", () => log.info("Grok agent restarted; its session re-binds on the next message."));
 
   process.on("SIGINT", () => shutdown(0, "SIGINT"));
   process.on("SIGTERM", () => shutdown(0, "SIGTERM"));

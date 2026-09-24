@@ -49,9 +49,7 @@ describe("rawSlashCommand content blocks", () => {
       skipSelfRecheck: true,
     });
     const blocks = buildContentBlocks(input, {
-      reasoning: "high",
       priming: "PRIOR CONTEXT",
-      progress: "PROGRESS RULES",
       imageOutput: "IMAGE RULES",
     });
     assert.equal(blocks.length, 1);

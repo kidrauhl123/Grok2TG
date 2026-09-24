@@ -57,12 +57,11 @@ export const DEFAULT_SELF_RECHECK_PROMPT = [
   "1) List every plausible bug/edge case for THESE changes (race, null, authz, wrong path,",
   "   regression, missing test, off-by-one, bad default, security hole, etc.).",
   "2) For each item: verify with tools or fix it. Briefly note only real findings.",
-  "3) Prefer {progress: 100%} only when this checklist is done and nothing critical remains.",
+  "3) Stop when this checklist is done and nothing critical remains.",
   "",
   "Rules:",
   "- Prefer fixing real problems with tools; do not invent unrelated features.",
   "- If everything checks out, briefly confirm what you verified (no long essay).",
-  "- End with an honest {progress: N%} marker for this recheck pass.",
   "",
   "USER'S REQUEST:",
   "{{USER}}",
@@ -81,7 +80,6 @@ export const SELF_RECHECK_COMPOSE_RULES = [
   "  half-done work that would force critical follow-up buttons. Finish those gaps now.",
   "- End with a per-bug recheck: list plausible bugs for these changes and verify/fix each.",
   "- Do NOT ask the user questions. Do NOT call enter_plan_mode unless truly necessary.",
-  "- End with an honest {progress: N%} marker for this recheck pass (100 only when checklist done).",
 ].join("\n");
 
 export interface Suggestion {

@@ -1,29 +1,20 @@
 /**
- * Reasoning effort — a per-chat preference that steers how much deliberation
- * the agent applies. Implemented as a concise directive prepended to prompts so
- * it works regardless of backend-specific knobs.
+ * Reasoning effort — the effort the model itself spends thinking, set on the
+ * live session through ACP `session/set_config_option` (`reasoning_effort`).
+ * It is not a sentence prepended to the prompt.
+ *
+ * These five are the levels grok-4.7 advertises. `max` is a grok CLI tier the
+ * model does not accept, so it is not offered.
  */
 import type { ReasoningEffort } from "./types.js";
-
-const DIRECTIVE: Record<ReasoningEffort, string> = {
-  minimal: "Answer directly and briefly with minimal deliberation.",
-  low: "Keep reasoning light; prefer a quick, concise solution.",
-  medium: "", // default behaviour — no directive
-  high: "Think carefully and thoroughly before answering; verify your work.",
-  max: "Use maximum rigor: explore edge cases, double-check assumptions, and verify the result before finishing.",
-};
 
 const LABEL: Record<ReasoningEffort, string> = {
   minimal: "Minimal",
   low: "Low",
   medium: "Medium",
   high: "High",
-  max: "Max",
+  xhigh: "Extra High",
 };
-
-export function reasoningDirective(effort: ReasoningEffort): string {
-  return DIRECTIVE[effort] ?? "";
-}
 
 export function reasoningLabel(effort: ReasoningEffort): string {
   return LABEL[effort] ?? effort;

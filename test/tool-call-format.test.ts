@@ -1,5 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
+import { toTelegramMarkdown } from "../src/render/markdown.js";
 import { formatToolCall } from "../src/render/tool-call.js";
 import { resolveToolIdentity, extractPath, kindFromToolName } from "../src/render/tool-call-detail.js";
 import type { SessionUpdate } from "../src/grok/types.js";
@@ -93,8 +94,57 @@ test("run_terminal_command shows bash command", () => {
   } as SessionUpdate;
   const md = formatToolCall(u, opts);
   assert.ok(md.includes("npm run typecheck"), md);
-  assert.ok(md.includes("```"), md);
+  assert.ok(md.includes("\u{1F4BB} command:"), md);
+  assert.ok(!md.includes("```"), md);
+  assert.ok(!toTelegramMarkdown(md).includes("||"), toTelegramMarkdown(md));
   assert.ok(!md.includes("Call MCP"), md);
+});
+
+test("read file body keeps the first line open and folds the rest", () => {
+  const u = {
+    sessionUpdate: "tool_call_update",
+    kind: "read",
+    status: "completed",
+    rawInput: { path: "src/bot/menu/keyboard.ts" },
+    content_blocks: [
+      {
+        type: "content",
+        content: { type: "text", text: "/**\n * Menu surfaces:\n */" },
+      },
+    ],
+  } as SessionUpdate;
+  const md = toTelegramMarkdown(formatToolCall(u, opts));
+  assert.ok(md.includes(">\u{1F4D6} file:"), md);
+  assert.ok(md.includes("**>"), md);
+  assert.ok(md.includes("||"), md);
+  assert.ok(md.includes("Menu surfaces"), md);
+});
+
+test("a multi-line command keeps its first line open and folds the rest", () => {
+  const u = {
+    sessionUpdate: "tool_call",
+    kind: "execute",
+    status: "completed",
+    rawInput: { command: "echo one\necho two\necho three" },
+  } as SessionUpdate;
+  const md = toTelegramMarkdown(formatToolCall(u, opts));
+  assert.ok(md.includes(">\u{1F4BB} command: echo one"), md);
+  assert.ok(md.includes("**>echo two"), md);
+  assert.ok(md.includes("echo three||"), md);
+});
+
+test("a long command line is cut while later lines stay folded", () => {
+  const long = "x".repeat(500);
+  const u = {
+    sessionUpdate: "tool_call",
+    kind: "execute",
+    status: "completed",
+    rawInput: { command: long + "\necho tail" },
+  } as SessionUpdate;
+  const md = toTelegramMarkdown(formatToolCall(u, opts));
+  assert.ok(md.includes("\u2026"), md);
+  assert.ok(!md.includes(long), md);
+  assert.ok(md.includes("echo tail||"), md);
 });
 
 test("namespaced MCP still labeled MCP with args", () => {
@@ -158,11 +208,9 @@ test("execute output uses single live-tail block", () => {
   const md = formatToolCall(u, opts);
   assert.ok(md.includes("npm test"), md);
   assert.ok(md.includes("out-0"), md);
-  assert.ok(md.includes("out-39"), md);
-  assert.ok(md.includes("Output"), md);
-  // Only one output fence (not spam of many).
-  const fences = md.split("```").length - 1;
-  assert.ok(fences >= 2 && fences <= 6, `fence count ${fences}: ${md}`);
+  const rendered = toTelegramMarkdown(md);
+  assert.ok(rendered.includes(">\u{1F4BB} output:"), rendered);
+  assert.ok(rendered.includes("**>out\\-1"), rendered);
 });
 
 test("completed update merged with prior rawInput is not bare Tool call", async () => {

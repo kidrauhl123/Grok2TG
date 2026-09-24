@@ -18,19 +18,9 @@ import type { PromptInput } from "../app/types.js";
  */
 export const AUTO_COMPLEXITY_DIRECTIVE = [
   "COMPLEXITY (decide yourself — never ask the user):",
-  "Silently classify this task as Simple or Complex. Do NOT ask the user which it is. Do NOT show Simple/Complex buttons or questions.",
-  "",
-  "If SIMPLE (clear path, small change, obvious fix, short answer):",
-  "  implement or answer directly with normal care.",
-  "",
-  "If COMPLEX (ambiguity, multi-file architecture, high rework risk, unclear approach):",
-  "  1. Enter plan mode (enter_plan_mode) when available.",
-  "  2. Investigate carefully: explore the codebase, map patterns, edge cases, and risks before coding.",
-  "  3. Write a solid plan to the plan file; prefer investigation over speed.",
-  "  4. Call exit_plan_mode when ready. This Telegram bridge auto-approves plan exit",
-  "     (there is no TUI plan popup). After exit_plan_mode succeeds, implement fully.",
-  "     Do NOT wait for the user to \"approve a popup\" — just call exit_plan_mode and proceed.",
-  "  5. After implementation, re-review your work (verify correctness, edge cases, and that the plan was followed) before finishing.",
+  "Silently decide Simple or Complex. Never ask, and never offer a choice.",
+  "Simple (clear path, small change, obvious fix, short answer): just do it.",
+  "Complex (ambiguous, multi-file, high rework risk, unclear approach): call enter_plan_mode, investigate the codebase before writing anything, write the plan, then call exit_plan_mode. This bridge auto-approves it — there is no popup to wait for — so implement as soon as it succeeds, then re-check the result against the plan before finishing.",
   "",
   "User task:",
 ].join("\n");

@@ -72,11 +72,8 @@ async function renderSessionPage(ctx: Context, deps: BotDeps, page: number): Pro
   const { resolveScope } = await import("../scope.js");
   const scope = resolveScope(ctx, deps);
   for (const m of slice) {
-    const contextPct = deps.acp.metadataFor(m.sessionId)?.contextUsagePercentage;
+    const contextPct = deps.pool.metadataFor(m.sessionId)?.contextUsagePercentage;
     const ctrl = scope.controller;
-    const progress =
-      ctrl.progressFor(m.sessionId) ??
-      deps.registry.forumControllerForSession(m.sessionId)?.progressFor(m.sessionId);
     // Live runtime (user + thinking) → last user from history → disk comment.
     const comment =
       ctrl.commentFor(m.sessionId) ||
@@ -85,8 +82,7 @@ async function renderSessionPage(ctx: Context, deps: BotDeps, page: number): Pro
       m.comment;
     const { text, keyboard } = buildSessionCard(m, {
       contextPct,
-      selfPid: deps.acp.pid,
-      progress,
+      selfPids: deps.pool.pids(),
       comment,
     });
     await deps.ephemeral.reply(ctx, text, { reply_markup: keyboard });

@@ -190,7 +190,7 @@ export function registerMcp(bot: Bot, deps: BotDeps): void {
     await ctx.answerCallbackQuery({ text: "Restarting agent\u2026" });
     await ctx.editMessageText("\u{1F504} Restarting the Grok agent to apply MCP changes\u2026").catch(() => {});
     try {
-      await deps.acp.restart();
+      await deps.pool.restartAll();
       const list = snapshot(ctx.chat!.id, deps);
       const { text, kb } = mainPanel(list);
       await ctx.editMessageText(`\u2705 Agent restarted \u2014 MCP changes applied.\n\n${text}`, {

@@ -3,7 +3,7 @@
  * mapping inline-keyboard buttons back to long values (project paths).
  */
 import type { Api } from "grammy";
-import type { GrokClient } from "../grok/client.js";
+import type { GrokPool } from "../grok/pool.js";
 import type { AccountManager } from "../app/accounts.js";
 import type { SettingsStore } from "../app/settings-store.js";
 import type { AppConfig } from "../config.js";
@@ -25,7 +25,7 @@ import type { TaskWizard } from "./wizard/task-wizard.js";
 export interface BotDeps {
   api: Api;
   cfg: AppConfig;
-  acp: GrokClient;
+  pool: GrokPool;
   registry: RuntimeRegistry;
   store: SessionStore;
   projects: ProjectManager;

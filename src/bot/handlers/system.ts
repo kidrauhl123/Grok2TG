@@ -37,7 +37,8 @@ export function registerSystem(bot: Bot, deps: BotDeps): void {
       return;
     }
     try {
-      await deps.acp.setModel(rt.sessionId, modelId);
+      const client = deps.pool.clientFor(rt.sessionId);
+      await client.setModel(rt.sessionId, modelId);
       await ctx.reply(`\u2705 Model set to \`${modelId}\` for this session.`, { parse_mode: "Markdown" });
     } catch (err) {
       await ctx.reply(`\u274C Could not set model: ${(err as Error).message}`);
@@ -45,9 +46,9 @@ export function registerSystem(bot: Bot, deps: BotDeps): void {
   });
 
   bot.command("restart", async (ctx) => {
-    await ctx.reply("\u{1F501} Restarting the Grok agent\u2026");
+    await ctx.reply("\u{1F501} Restarting every Grok agent\u2026");
     try {
-      await deps.acp.restart();
+      await deps.pool.restartAll();
       await ctx.reply("\u2705 Grok agent restarted. Your session will re-bind on the next message.");
     } catch (err) {
       await ctx.reply(`\u274C Restart failed: ${(err as Error).message}`);
@@ -76,7 +77,7 @@ export function registerSystem(bot: Bot, deps: BotDeps): void {
       upsertEnv("GROK_SANDBOX", arg);
       deps.cfg.sandboxProfile = arg;
       process.env.GROK_SANDBOX = arg;
-      deps.acp.setAgentOptions({ sandboxProfile: arg });
+      deps.pool.setAgentOptions({ sandboxProfile: arg });
       await ctx.reply(`\u2705 GROK_SANDBOX=${arg} written. Send /restart to apply.`);
     } catch (e) {
       await ctx.reply(`\u274C Could not write .env: ${(e as Error).message}`);
@@ -93,7 +94,7 @@ export function registerSystem(bot: Bot, deps: BotDeps): void {
       upsertEnv("GROK_SANDBOX", profile);
       deps.cfg.sandboxProfile = profile;
       process.env.GROK_SANDBOX = profile;
-      deps.acp.setAgentOptions({ sandboxProfile: profile });
+      deps.pool.setAgentOptions({ sandboxProfile: profile });
       await ctx.answerCallbackQuery({ text: profile });
       await ctx.editMessageText(`\u2705 GROK_SANDBOX=${profile}. Send /restart to apply.`).catch(() => {});
     } catch (e) {

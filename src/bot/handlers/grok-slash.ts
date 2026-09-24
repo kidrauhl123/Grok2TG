@@ -298,7 +298,7 @@ export async function submitGrokSlash(ctx: Context, deps: BotDeps, line: string)
 
     if (!preferPrompt && rt.sessionId) {
       try {
-        await deps.acp.executeCommand(rt.sessionId, grokLine);
+        await deps.pool.clientFor(rt.sessionId).executeCommand(rt.sessionId, grokLine);
         await ctx.reply(`\u25B6\uFE0F Sent to Grok: \`${grokLine}\``, extra);
         return;
       } catch (err) {

@@ -68,11 +68,14 @@ export function toTelegramMarkdown(src: string): string {
   return out.replace(/\n{4,}/g, "\n\n\n").trim();
 }
 
+/** A code block longer than this is cut to its head and tail. */
+const CODE_BLOCK_MAX = 1200;
+
 /** Emit a Telegram-safe fenced block; fence length adapts to body content. */
 function fenceOut(code: string, lang: string): string {
   // Drop a single trailing newline so we don't pad every closed fence with a
   // blank line inside the code block; keep internal newlines intact.
-  const body = code.endsWith("\n") ? code.slice(0, -1) : code;
+  const body = capCodeBlock(code.endsWith("\n") ? code.slice(0, -1) : code);
   let tickLen = 3;
   const runs = body.match(/`+/g);
   if (runs) {
@@ -81,6 +84,15 @@ function fenceOut(code: string, lang: string): string {
   }
   const marker = "`".repeat(tickLen);
   return marker + lang + "\n" + escapeCode(body) + "\n" + marker + "\n";
+}
+
+/** Keep the start and end of a long code block; the middle is display-only. */
+function capCodeBlock(body: string): string {
+  if (body.length <= CODE_BLOCK_MAX) return body;
+  const note = "\n… (middle omitted) …\n";
+  const budget = CODE_BLOCK_MAX - note.length;
+  const head = Math.floor(budget * 0.6);
+  return body.slice(0, head) + note + body.slice(body.length - (budget - head));
 }
 
 /**
@@ -150,10 +162,61 @@ function sanitizeFenceLang(raw: string): string {
 
 function renderTextBlock(text: string): string {
   if (!text) return "";
-  return text
-    .split("\n")
-    .map((line) => renderLine(line))
-    .join("\n");
+  const lines = text.split("\n");
+  const out: string[] = [];
+  for (let i = 0; i < lines.length; ) {
+    const quote = /^(>)\s?(.*)$/.exec(lines[i] ?? "");
+    if (!quote) {
+      out.push(renderLine(lines[i] ?? ""));
+      i += 1;
+      continue;
+    }
+    const bodies: string[] = [];
+    while (i < lines.length) {
+      const next = /^(>)\s?(.*)$/.exec(lines[i] ?? "");
+      if (!next) break;
+      bodies.push(next[2] ?? "");
+      i += 1;
+    }
+    // Thinking and command cards are one quote. An expandable quote hides
+    // every line, so keep the first line open and collapse only the rest.
+    if (isFoldableQuote(bodies[0] ?? "")) {
+      const first = ">" + renderQuoteInline(bodies[0] ?? "");
+      const rest = bodies.slice(1);
+      // Command cards leave the folded lines unquoted, so they arrive here as
+      // the following plain lines rather than more `>` lines.
+      if (rest.length === 0) {
+        while (i < lines.length && (lines[i] ?? "") !== "") {
+          rest.push(lines[i] ?? "");
+          i += 1;
+        }
+      }
+      out.push(rest.length > 0 ? `${first}\n${renderExpandableQuote(rest)}` : first);
+    } else {
+      for (const body of bodies) out.push(">" + renderQuoteInline(body));
+    }
+  }
+  return out.join("\n");
+}
+
+/** First line of a quote that keeps itself visible and folds the rest. */
+function isFoldableQuote(body: string): boolean {
+  return (
+    body.startsWith("\u{1F4AD} thinking:") ||
+    body.startsWith("\u{1F4BB} command:") ||
+    body.startsWith("\u{1F4BB} output:") ||
+    body.startsWith("\u{1F4D6} file:")
+  );
+}
+
+/** MarkdownV2 expandable blockquote: empty bold + `>` lines, closed by `||`. */
+function renderExpandableQuote(bodies: string[]): string {
+  const rendered = bodies.map((body) => renderQuoteInline(body));
+  if (rendered.length === 1) return `**>${rendered[0]}||`;
+  const head = `**>${rendered[0]}`;
+  const mid = rendered.slice(1, -1).map((line) => `>${line}`);
+  const tail = `>${rendered[rendered.length - 1]}||`;
+  return [head, ...mid, tail].join("\n");
 }
 
 function renderLine(line: string): string {

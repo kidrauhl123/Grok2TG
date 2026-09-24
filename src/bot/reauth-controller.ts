@@ -6,7 +6,7 @@
  * identity. State is per chat so button callbacks work across updates.
  */
 import { type Api, InlineKeyboard } from "grammy";
-import type { GrokClient } from "../grok/client.js";
+import type { GrokPool } from "../grok/pool.js";
 import { AuthService } from "../app/auth-service.js";
 import type { AccountInfo } from "../app/usage.js";
 import { createLogger } from "../logger.js";
@@ -48,7 +48,7 @@ export class ReauthController {
 
   constructor(
     private readonly api: Api,
-    private readonly grok: GrokClient,
+    private readonly pool: GrokPool,
     grokCliPath: string,
     private readonly getAccount?: () => Promise<AccountInfo | undefined>,
     private readonly verifyLogin?: () => Promise<boolean>,
@@ -83,7 +83,7 @@ export class ReauthController {
   /** Run `grok logout` + `grok login`, then restart the agent. */
   async beginLogin(chatId: number, messageId: number): Promise<void> {
     if (this.isBusy(chatId) || this.anyActive()) return;
-    if (this.grok.hasInflightPrompt()) {
+    if (this.pool.liveClients().some((c) => c.hasInflightPrompt())) {
       await this.api.sendMessage(chatId, "\u23F3 Grok is busy running a turn — try /reauth when idle (or /cancel first).").catch(() => {});
       return;
     }
@@ -143,7 +143,7 @@ export class ReauthController {
     try {
       this.startAnim(s);
       await this.render(s);
-      await this.grok.stopAndWait(); // release the agent before sign-in
+      await this.pool.stopAllAndWait(); // release every agent before sign-in
       agentDown = true;
       await this.auth.logout();
       if (s.abort.signal.aborted) {
@@ -180,7 +180,7 @@ export class ReauthController {
       }
       s.phase = "restarting";
       await this.render(s);
-      await this.grok.start(true);
+      await this.pool.start(true);
       agentDown = false;
       s.accountLabel = accountLabel(await this.getAccount?.().catch(() => undefined));
       s.phase = "done";
@@ -191,14 +191,14 @@ export class ReauthController {
     } finally {
       s.abort = undefined;
       this.stopAnim(s);
-      if (agentDown) await this.grok.start(true).catch((e) => log.warn("post-reauth restart failed:", (e as Error).message));
+      if (agentDown) await this.pool.start(true).catch((e) => log.warn("post-reauth restart failed:", (e as Error).message));
       await this.render(s);
     }
   }
 
   private async finishRestart(s: ReauthSession): Promise<void> {
     try {
-      await this.grok.restart();
+      await this.pool.restartAll();
       s.accountLabel = accountLabel(await this.getAccount?.().catch(() => undefined));
       s.phase = "done";
     } catch (e) {

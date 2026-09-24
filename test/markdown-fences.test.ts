@@ -30,12 +30,37 @@ test("unclosed fence keeps content (streaming)", () => {
   assert.ok(md.includes("const x = 1;"));
 });
 
+test("command quote folds after the first line", () => {
+  const src = "> \u{1F4BB} command: echo one\n> echo two\n> echo three";
+  const md = toTelegramMarkdown(src);
+  assert.ok(md.startsWith(">\u{1F4BB} command: echo one"), md);
+  assert.ok(md.includes("**>echo two"), md);
+  assert.ok(md.includes(">echo three||"), md);
+});
+
+test("one-line command quote stays open", () => {
+  const md = toTelegramMarkdown("> \u{1F4BB} command: echo one");
+  assert.ok(md.startsWith(">\u{1F4BB} command: echo one"), md);
+  assert.ok(!md.includes("||"), md);
+  assert.ok(!md.includes("**>"), md);
+});
+
 test("thinking quotes neutralize triple backticks", () => {
   const src = "> \u{1F4AD} thinking: looks at ```ts code``` fence";
   const md = toTelegramMarkdown(src);
-  // Should not leave an unclosed/broken fence entity.
-  assert.ok(md.includes(">"));
+  // A one-line thought stays visible; fences must not stay open.
+  assert.ok(md.startsWith(">\u{1F4AD} thinking:"));
+  assert.ok(!md.includes("||"));
   assert.ok(!/`{3,}ts/.test(md) || md.includes("\\`"), md);
+});
+
+test("thinking quotes collapse and ordinary quotes stay open", () => {
+  const src = "> \u{1F4AD} thinking: first\n> second line\n\n> ordinary quote";
+  const md = toTelegramMarkdown(src);
+  assert.ok(md.startsWith(">\u{1F4AD} thinking: first\n**>"));
+  assert.match(md, />second line\|\|/);
+  assert.ok(md.includes(">ordinary quote"));
+  assert.ok(!md.includes("**>ordinary"));
 });
 
 test("unbalanced bold is escaped not dropped", () => {

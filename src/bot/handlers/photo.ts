@@ -3,8 +3,8 @@
  * albums / media groups) and submits them to Grok as ACP image content blocks
  * alongside the caption text.
  *
- * User media messages are replaced by a bot prompt anchor (`#prompt_<id>`);
- * the agent still receives the downloaded image bytes.
+ * User media messages stay in the chat. The agent still receives the
+ * downloaded image bytes, and replies thread to the original message.
  */
 import type { Bot, Context } from "grammy";
 import type { PromptImage } from "../../app/types.js";

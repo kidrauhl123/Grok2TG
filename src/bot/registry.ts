@@ -11,7 +11,7 @@
  * is asked of its parent chat).
  */
 import type { Api } from "grammy";
-import type { GrokClient } from "../grok/client.js";
+import type { GrokPool } from "../grok/pool.js";
 import type { PendingStage, SubagentInfo } from "../grok/types.js";
 import type { SettingsStore } from "../app/settings-store.js";
 import type { AppConfig } from "../config.js";
@@ -51,12 +51,12 @@ export class RuntimeRegistry {
 
   constructor(
     private readonly api: Api,
-    private readonly acp: GrokClient,
+    private readonly pool: GrokPool,
     private readonly cfg: AppConfig,
     private readonly settings: SettingsStore,
     private readonly store: SessionStore,
   ) {
-    this.acp.on("subagents", (subagents, pending) => this.onSubagents(subagents, pending));
+    this.pool.on("subagents", (subagents, pending) => this.onSubagents(subagents, pending));
   }
 
   setRefresher(fn: (chatId: number) => void): void {
@@ -81,7 +81,7 @@ export class RuntimeRegistry {
       c = new ChatController(
         this.api,
         chatId,
-        this.acp,
+        this.pool,
         this.cfg,
         this.settings,
         this.store,
@@ -122,7 +122,7 @@ export class RuntimeRegistry {
       c = new ChatController(
         this.api,
         chatId,
-        this.acp,
+        this.pool,
         this.cfg,
         this.settings,
         this.store,
@@ -230,7 +230,7 @@ export class RuntimeRegistry {
       };
     }
     const parent = this.subagentParents.get(sessionId);
-    const info = this.acp.subagentById(sessionId);
+    const info = this.pool.subagentById(sessionId);
     if (parent !== undefined || info) {
       // Prefer the parent chat's active forum thread so SSH/exec prompts land
       // in the project topic, not General.
@@ -260,9 +260,9 @@ export class RuntimeRegistry {
 
   /** Subagent summary line for a chat's status panel, or undefined. */
   subagentSummaryForChat(chatId: number): string | undefined {
-    const mine = this.acp.currentSubagents().filter((s) => this.subagentParents.get(s.sessionId) === chatId);
+    const mine = this.pool.currentSubagents().filter((s) => this.subagentParents.get(s.sessionId) === chatId);
     if (mine.length === 0) return undefined;
-    return subagentSummary(mine, this.acp.currentPendingStages());
+    return subagentSummary(mine, this.pool.currentPendingStages());
   }
 
   // ── subagent attribution ─────────────────────────────────────────────────
@@ -336,7 +336,7 @@ export class RuntimeRegistry {
       const runtimes = this.busyRuntimesForChat(chatId, preferThread);
       for (const rt of runtimes) {
         try {
-          if (rt.sessionId) this.acp.touchActivity(rt.sessionId);
+          if (rt.sessionId) this.pool.touch(rt.sessionId);
           rt.renderSubagents(list, pending);
         } catch {
           /* non-fatal */

@@ -1,9 +1,18 @@
 /**
  * Split a MarkdownV2 string into Telegram-sized chunks (<= 4096 chars) without
- * breaking code fences. If a split happens inside a fenced block, the block is
- * closed before the boundary and reopened in the next chunk (same tick length).
+ * breaking code fences or expandable quotes. A split inside either construct
+ * closes it before the boundary and reopens it in the next chunk.
+ *
+ * Expandable quotes are MarkdownV2 `**>` … `||`. A cut that leaves `**>`
+ * without its closing `||` makes Telegram drop the whole entity, so the
+ * thinking quote renders fully open.
  */
 const LIMIT = 4000; // headroom under Telegram's 4096 hard limit
+
+/** A line that opens an expandable quote, and is not itself the close. */
+function opensExpandable(line: string): boolean {
+  return line.startsWith("**>") && !line.endsWith("||");
+}
 
 export function chunkMarkdown(text: string, limit = LIMIT): string[] {
   if (text.length <= limit) return text.length ? [text] : [];
@@ -14,10 +23,13 @@ export function chunkMarkdown(text: string, limit = LIMIT): string[] {
   let size = 0;
   /** Open fence: tick count + optional lang; null when outside a fence. */
   let openFence: { ticks: number; lang: string } | null = null;
+  /** True after a `**>` line until the line that ends with `||`. */
+  let openExpandable = false;
 
   const flush = (): void => {
     if (current.length === 0) return;
     let body = current.join("\n");
+    if (openExpandable && !body.endsWith("||")) body += "||";
     if (openFence) body += "\n" + "`".repeat(openFence.ticks); // close dangling fence
     chunks.push(body);
     current = [];
@@ -27,6 +39,12 @@ export function chunkMarkdown(text: string, limit = LIMIT): string[] {
       const reopen = "`".repeat(openFence.ticks) + openFence.lang;
       current.push(reopen);
       size = reopen.length + 1;
+    }
+    if (openExpandable) {
+      // Continue the collapsed quote. `**>` reopens it; the later `||` closes it.
+      const reopen = "**>";
+      current.push(reopen);
+      size += reopen.length + 1;
     }
   };
 
@@ -57,6 +75,9 @@ export function chunkMarkdown(text: string, limit = LIMIT): string[] {
         openFence = null;
       }
     }
+
+    if (opensExpandable(line)) openExpandable = true;
+    else if (openExpandable && line.endsWith("||")) openExpandable = false;
   }
 
   flush();

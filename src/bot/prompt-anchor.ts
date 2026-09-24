@@ -1,15 +1,10 @@
 /**
  * Prompt anchors & command acks — instant bot feedback while the CLI/ACP warms up.
  *
- * When the user sends a prompt we:
- *   1. post a bot-owned message with the prompt text + `#prompt_<id>`
- *      (and re-attach any photos/files/voice so media is not lost when the
- *      user's original is deleted)
- *   2. best-effort delete the user's original message(s)
- *   3. thread every AI reply (and Done/error) to that bot message
- *
- * Commands use {@link ackCommand}: delete the slash message immediately and
- * post a short status so the chat never looks dead during slow handlers.
+ * When the user sends a prompt we keep their message and thread every AI
+ * reply (and Done/error) to it. A bot-owned `#prompt_<id>` anchor is only
+ * posted when there is no user message to keep (for example a suggestion
+ * button). The user's own text, media, and commands are never deleted.
  */
 import type { Api, Context } from "grammy";
 import { InputMediaBuilder } from "grammy";
@@ -149,15 +144,21 @@ export function fitCaption(body: string, max = CAPTION_BUDGET): string {
 }
 
 /**
- * Post a bot-owned prompt message (with media when provided), delete the user's
- * original(s), return ids for threading + tagging. On send failure returns
- * undefined (caller falls back).
+ * Thread replies to the user's own message when one exists. A bot-owned
+ * anchor is posted only when there is nothing to keep. Never deletes the
+ * user's message. On send failure returns undefined (caller falls back).
  */
 export async function adoptUserPrompt(
   api: Api,
   opts: AdoptPromptOpts,
 ): Promise<PromptAnchor | undefined> {
   const promptId = newPromptId();
+  const keepId = opts.userMessageIds.find((id) => Number.isFinite(id) && id > 0);
+  if (keepId !== undefined) {
+    // Leave the user's message in the chat and thread replies to it.
+    // Posting another copy (or re-uploading their media) just duplicates it.
+    return { replyTo: keepId, promptId };
+  }
   const parts = splitPromptAnchorParts(opts.text, promptId, {
     prefix: opts.prefix,
     projectName: opts.projectName,
@@ -206,7 +207,6 @@ export async function adoptUserPrompt(
     }
   }
 
-  await deleteUserMessages(api, opts.chatId, opts.userMessageIds);
   return { replyTo, promptId };
 }
 
@@ -345,7 +345,6 @@ export async function ackCommand(
   text: string,
   extra: Record<string, unknown> = {},
 ): Promise<number | undefined> {
-  void ctx.deleteMessage().catch(() => {});
   try {
     const msg = await ctx.reply(text, extra);
     return msg.message_id;

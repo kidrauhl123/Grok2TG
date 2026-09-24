@@ -21,8 +21,8 @@ const UUID = "([0-9a-fA-F-]{36})";
 
 /** Rebuild the standard card keyboard for the freshest on-disk session state. */
 function cardKeyboard(deps: BotDeps, meta: SessionMeta): InlineKeyboard {
-  const contextPct = deps.acp.metadataFor(meta.sessionId)?.contextUsagePercentage;
-  return buildSessionCard(meta, { contextPct, selfPid: deps.acp.pid }).keyboard;
+  const contextPct = deps.pool.metadataFor(meta.sessionId)?.contextUsagePercentage;
+  return buildSessionCard(meta, { contextPct, selfPids: deps.pool.pids() }).keyboard;
 }
 
 /** Re-read the session and decide whether its PID may be killed right now. */
@@ -35,7 +35,7 @@ function killable(
   if (!meta.active || typeof meta.lockPid !== "number") {
     return { ok: false, meta, reason: "Session is no longer running." };
   }
-  if (meta.lockPid === deps.acp.pid) {
+  if (meta.lockPid !== undefined && deps.pool.pids().includes(meta.lockPid)) {
     return { ok: false, meta, reason: "That's the bot's own agent — can't kill it." };
   }
   return { ok: true, meta, pid: meta.lockPid };

@@ -8,7 +8,7 @@
  */
 import { basename } from "node:path";
 import type { SessionUpdate } from "../grok/types.js";
-import { extractProgress } from "./progress.js";
+import { stripProgressMarkers } from "./progress.js";
 import {
   extractCommand,
   extractPath,
@@ -125,7 +125,7 @@ export function buildSessionCardComment(opts: {
  * append; conclusions land at the end). Collapse whitespace and clamp.
  */
 export function clampThinking(raw: string, max = COMMENT_MAX): string {
-  let t = extractProgress(raw).cleaned;
+  let t = stripProgressMarkers(raw);
   t = t.replace(/```[\s\S]*?```/g, " ");
   t = t.replace(/\s+/g, " ").trim();
   if (!t) return "";
@@ -145,7 +145,7 @@ export function clampThinking(raw: string, max = COMMENT_MAX): string {
  */
 export function extractResultSnippet(assistantText: string | undefined, max = 160): string {
   if (!assistantText?.trim()) return "";
-  let t = extractProgress(assistantText).cleaned;
+  let t = stripProgressMarkers(assistantText);
   // Drop fenced code / diffs / tool-looking blocks — keep prose.
   t = t.replace(/```[\s\S]*?```/g, " ");
   t = t.replace(/^>\s?.*$/gm, " "); // quoted thinking

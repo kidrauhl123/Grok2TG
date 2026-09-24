@@ -10,7 +10,7 @@ import { ReauthController } from "../reauth-controller.js";
 export function registerReauth(bot: Bot, deps: BotDeps): void {
   const controller = new ReauthController(
     deps.api,
-    deps.acp,
+    deps.pool,
     deps.cfg.grokCliPath,
     () => deps.usage.account(),
     () => deps.usage.isLoggedIn(),
@@ -21,7 +21,7 @@ export function registerReauth(bot: Bot, deps: BotDeps): void {
       await ctx.reply("\u{1F510} A sign-in is already in progress.");
       return;
     }
-    if (deps.acp.hasInflightPrompt()) {
+    if (deps.pool.liveClients().some((c) => c.hasInflightPrompt())) {
       await ctx.reply("\u23F3 Grok is busy running a turn — try /reauth when idle (or /cancel first).");
       return;
     }

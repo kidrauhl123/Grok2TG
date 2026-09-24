@@ -6,7 +6,7 @@
  */
 import { basename } from "node:path";
 import type { Api } from "grammy";
-import type { GrokClient } from "../grok/client.js";
+import type { GrokPool } from "../grok/pool.js";
 import type { SettingsStore } from "../app/settings-store.js";
 import type { AppConfig } from "../config.js";
 import { jsonlSize, readEntriesFrom, readHistory } from "../sessions/history.js";
@@ -21,8 +21,6 @@ export interface RunningSession {
   busy: boolean;
   foreground: boolean;
   unread: number;
-  /** Latest task-completion % (0–100) for this session, if known. */
-  progress?: number;
   /** Card comment: last user prompt (+ last AI thinking while busy). */
   comment?: string;
 }
@@ -72,7 +70,7 @@ export class ChatController {
   constructor(
     private readonly api: Api,
     private readonly chatId: number,
-    private readonly acp: GrokClient,
+    private readonly pool: GrokPool,
     private readonly cfg: AppConfig,
     private readonly settings: SettingsStore,
     private readonly store: SessionStore,
@@ -111,7 +109,6 @@ export class ChatController {
       busy: rt.isBusy,
       foreground: rt.isForeground,
       unread: this.unreadCount(rt),
-      progress: rt.taskProgress,
       comment: rt.cardComment,
     }));
   }
@@ -408,13 +405,6 @@ export class ChatController {
     return this.runtimes.length;
   }
 
-  /** Latest task-progress % for a controlled session id, if this chat runs it. */
-  progressFor(sessionId?: string): number | undefined {
-    if (!sessionId) return undefined;
-    this.ensureRestored();
-    return this.runtimes.find((r) => r.sessionId === sessionId)?.taskProgress;
-  }
-
   /** Last user prompt (+ thinking when busy) for a controlled session id. */
   commentFor(sessionId?: string): string | undefined {
     if (!sessionId) return undefined;
@@ -511,7 +501,7 @@ export class ChatController {
   }
 
   private create(init: { cwd: string; projectName?: string; sessionId?: string }): SessionRuntime {
-    const rt = new SessionRuntime(this.api, this.chatId, this.acp, this.cfg, this.settings, {
+    const rt = new SessionRuntime(this.api, this.chatId, this.pool, this.cfg, this.settings, {
       ...init,
       messageThreadId: this.messageThreadId,
       settingsKey: this.settingsKey,

@@ -5,7 +5,7 @@
  */
 import type { Api } from "grammy";
 import { basename } from "node:path";
-import type { GrokClient } from "../grok/client.js";
+import type { GrokPool } from "../grok/pool.js";
 import { contentText, type SessionUpdate } from "../grok/types.js";
 import { createLogger } from "../logger.js";
 import { sendMarkdownDoc } from "../bot/telegram-io.js";
@@ -16,7 +16,7 @@ const log = createLogger("task-runner");
 export class TaskRunner {
   constructor(
     private readonly api: Api,
-    private readonly acp: GrokClient,
+    private readonly pool: GrokPool,
   ) {}
 
   /** Run a task; resolves true on success, false on error. */
@@ -42,21 +42,27 @@ export class TaskRunner {
     };
 
     try {
-      sessionId = await this.acp.newSession(task.projectPath);
+      const client = await this.pool.acquire();
+      sessionId = await client.newSession(task.projectPath);
+      this.pool.bind(sessionId, client);
       if (task.agent) {
         try {
-          await this.acp.setMode(sessionId, task.agent);
+          await client.setMode(sessionId, task.agent);
         } catch {
           /* best-effort */
         }
       }
-      this.acp.on("session-update", listener);
-      await this.acp.prompt(sessionId, [{ type: "text", text: task.prompt }]);
-      this.acp.off("session-update", listener);
+      client.on("session-update", listener);
+      try {
+        await client.prompt(sessionId, [{ type: "text", text: task.prompt }]);
+      } finally {
+        client.off("session-update", listener);
+        this.pool.unbind(sessionId);
+      }
       await this.deliver(task, text, tools);
       return true;
     } catch (err) {
-      this.acp.off("session-update", listener);
+      this.pool.unbind(sessionId);
       await this.deliverError(task, (err as Error).message);
       log.error(`task "${task.name}" failed:`, (err as Error).message);
       return false;

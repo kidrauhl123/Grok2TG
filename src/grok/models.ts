@@ -17,6 +17,7 @@ export const DEFAULT_MODEL = "grok-4.5";
 
 /** Known models (best-effort; the agent's own list wins when advertised). */
 export const KNOWN_MODELS: GrokModel[] = [
+  { modelId: "grok-4.7", name: "Grok 4.7", description: "Current flagship", contextWindow: 128_000 },
   { modelId: "grok-4.5", name: "Grok 4.5", description: "Flagship coding model (default)", contextWindow: 256_000 },
   { modelId: "grok-4.20-non-reasoning", name: "Grok 4.20 (non-reasoning)", description: "Faster, no deep reasoning", contextWindow: 256_000 },
   { modelId: "grok-4", name: "Grok 4", description: "Grok 4", contextWindow: 256_000 },

@@ -1,33 +1,13 @@
 /**
  * Menu surfaces:
- *  - PERSISTENT bar (reply keyboard): ☰ Menu · 🆕 New session / 🧭 Running · ⏹ Stop
- *    — primary place for New session in private chats (not the inline Menu message).
- *  - INLINE menu message (opened via ☰ Menu or /menu) — settings & navigation.
- *    Forum topics: reply keyboards are unreliable, so New stays on the topic inline menu.
- * Live state lives in the pinned status panel so the bar stays clean.
+ *  - No buttons for Menu, New, Running or Stop. Those are slash commands:
+ *    /menu /new /running /stop /cancel.
+ *  - INLINE menu message (opened via /menu) — settings & navigation only.
+ * Live state lives in the pinned status panel.
  */
-import { InlineKeyboard, Keyboard } from "grammy";
+import { InlineKeyboard } from "grammy";
 
-export const MENU_BTN = "\u2630 Menu"; // ☰
-/** Persistent bar + forum topic control — brand-new session (same as /new). */
-export const NEW_BTN = "\u{1F195} New session";
-export const RUNNING_BTN = "\u{1F9ED} Running";
-export const STOP_BTN = "\u23F9 Stop";
-export const BAR_LABELS = [MENU_BTN, NEW_BTN, RUNNING_BTN, STOP_BTN];
-
-/** The always-visible compact bar (private chats; best-effort in groups). */
-export function compactKeyboard(): Keyboard {
-  return new Keyboard()
-    .text(MENU_BTN)
-    .text(NEW_BTN)
-    .row()
-    .text(RUNNING_BTN)
-    .text(STOP_BTN)
-    .resized()
-    .persistent();
-}
-
-/** The full, grouped inline menu (opened via ☰ Menu or /menu). */
+/** The full, grouped inline menu (opened via /menu). */
 export function mainMenuInline(state: {
   model: string;
   reasoning: string;
@@ -38,12 +18,7 @@ export function mainMenuInline(state: {
   const kb = new InlineKeyboard();
 
   if (state.forumTopic) {
-    // Groups/topics: control first (no reliable reply-keyboard bar). New session here.
-    kb.text("\u23F9 Stop", "m:stop")
-      .text("\u{1F9ED} Running", "m:running")
-      .row()
-      .text(NEW_BTN, "m:new")
-      .text("\u{1F5C2} Sessions", "m:sessions")
+    kb.text("\u{1F5C2} Sessions", "m:sessions")
       .row()
       .text(`\u{1F4C1} ${t(state.forumTopic.name, 28)}`, "m:topicinfo")
       .row()
@@ -60,12 +35,9 @@ export function mainMenuInline(state: {
     return kb;
   }
 
-  // Private chat: New session is on the persistent bar + /new — not on this message.
+  // Private chat.
   kb.text("\u{1F4C1} Project", "m:project")
     .text("\u{1F5C2} Sessions", "m:sessions")
-    .row()
-    .text("\u23F9 Stop", "m:stop")
-    .text("\u{1F9ED} Running", "m:running")
     .row()
     .text("\u{1F4E5} Import session", "m:import")
     .row()
@@ -82,8 +54,6 @@ export function mainMenuInline(state: {
     .text("\u{1F9E9} MCP", "m:mcp")
     .text("\u{1F6D1} Kill all", "m:killall")
     .row()
-    .text("\u2328\uFE0F Show bar", "m:showbar")
-    .text("\u{1F648} Hide bar", "m:hidebar")
     .text("\u2716 Close", "m:close");
   return kb;
 }

@@ -26,6 +26,14 @@ const PATH_RE =
 const IMAGE_EXT = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp"]);
 const MAX_FILE_BYTES = 45 * 1024 * 1024;
 
+/** True when `path` is `dir` itself or a file inside it. */
+function isInside(path: string, dir: string): boolean {
+  const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
+  const file = norm(path);
+  const root = norm(dir);
+  return file === root || file.startsWith(root + "/");
+}
+
 /** Pull candidate image paths out of arbitrary text, resolved against cwd. */
 export function extractImagePaths(text: string, cwd: string): string[] {
   const out = new Set<string>();
@@ -113,11 +121,17 @@ export function collectTurnImagePaths(opts: {
   add(extractImagePaths(opts.scanText, opts.cwd));
   add(listFreshImagesInDir(join(opts.cwd, "images"), opts.since));
   if (opts.sessionId) {
-    for (const dir of grokSessionMediaDirs(opts.cwd, opts.sessionId)) {
-      add(listFreshImagesInDir(dir, opts.since));
-    }
+    // Only the session `images/` folder. `assets/` is where Grok stores the
+    // user's own uploaded photos, and the model echoes that path back — sending
+    // it would hand the user their own picture again.
+    add(listFreshImagesInDir(join(grokSessionMediaRoot(opts.cwd, opts.sessionId), "images"), opts.since));
   }
-  return out;
+  // A path the model names explicitly is still sent, unless it points at the
+  // user's own upload in the session assets folder.
+  const assetsDir = opts.sessionId
+    ? grokSessionAssetsDir(opts.cwd, opts.sessionId)
+    : undefined;
+  return out.filter((p) => !assetsDir || !isInside(p, assetsDir));
 }
 
 export interface SendImagesOptions {

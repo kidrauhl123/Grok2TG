@@ -8,7 +8,6 @@
  */
 import { InlineKeyboard } from "grammy";
 import { basename } from "node:path";
-import { progressBar } from "../../render/progress.js";
 import type { SessionMeta } from "../../sessions/types.js";
 // Note: callers may pass `comment` from runtime or history (last-turn outcome).
 
@@ -16,13 +15,11 @@ export interface SessionCardExtras {
   /** Context-usage %, when the session is loaded in the current ACP process. */
   contextPct?: number;
   /**
-   * PID of the bot's own `grok acp` process. A session locked by this PID
-   * powers the bot itself, so its card omits the Kill button (killing it would
-   * take the bot down). Other live sessions get a 🛑 Kill button.
+   * PIDs of the bot's own `grok agent` processes (one per session). A session
+   * locked by one of these powers the bot itself, so its card omits the Kill
+   * button. Other live sessions get a Kill button.
    */
-  selfPid?: number;
-  /** Latest task-completion % (0–100) for this session, if this chat runs it. */
-  progress?: number;
+  selfPids?: number[];
   /**
    * Last user prompt (and, when busy, last AI thinking on a second line).
    * Overrides `m.comment` when provided by the controlling chat runtime.
@@ -48,7 +45,7 @@ export function buildSessionCard(m: SessionMeta, extra: SessionCardExtras = {}):
   if (m.cwd) lines.push(`   ${m.cwd}`);
   // Last user prompt always; second line = thinking while running.
   if (comment) {
-    const busy = m.active || typeof extra.progress === "number";
+    const busy = m.active;
     const parts = comment.split("\n").map((l) => l.trim()).filter(Boolean);
     parts.forEach((part, i) => {
       const clipped = part.length > COMMENT_LINE_MAX ? part.slice(0, COMMENT_LINE_MAX - 1) + "\u2026" : part;
@@ -60,7 +57,6 @@ export function buildSessionCard(m: SessionMeta, extra: SessionCardExtras = {}):
   lines.push(`\u{1F552} updated ${relTime(m.updatedAt)} \u00B7 created ${relTime(m.createdAt)}`);
   const ctx = typeof extra.contextPct === "number" ? ` \u00B7 \u{1F9E0} ctx ${Math.round(extra.contextPct)}%` : "";
   lines.push(`\u{1F4CA} ${state} \u00B7 \u{1F4DC} history ${humanSize(m.historyBytes)}${ctx}`);
-  if (typeof extra.progress === "number") lines.push(`\u{1F4C8} ${progressBar(extra.progress)}`);
   lines.push(`\u{1F194} ${m.sessionId.slice(0, 8)}`);
 
   const connect = m.active ? "\u{1F374} Continue (fork)" : "\u{1F517} Resume";
@@ -69,9 +65,10 @@ export function buildSessionCard(m: SessionMeta, extra: SessionCardExtras = {}):
     .text("\u{1F4DC} History", `hist:${m.sessionId}`)
     .text("\u{1F4E1} Watch", `watch:${m.sessionId}`);
 
-  // A live session running in another process can be terminated by PID. The
-  // bot's own agent (selfPid) is never offered — killing it would stop the bot.
-  if (m.active && typeof m.lockPid === "number" && m.lockPid !== extra.selfPid) {
+  // A live session running in another process can be terminated by PID. Any of
+  // the bot's own agents (selfPids) is never offered — killing it stops a topic.
+  const owned = new Set(extra.selfPids ?? []);
+  if (m.active && typeof m.lockPid === "number" && !owned.has(m.lockPid)) {
     keyboard.row().text(`\u{1F6D1} Kill \u00B7 pid ${m.lockPid}`, `killsess:${m.sessionId}`);
   }
 

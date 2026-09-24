@@ -77,3 +77,16 @@ test("collectTurnImagePaths merges text paths and assets dir", () => {
   });
   assert.ok(paths.some((p) => p === shot || p.endsWith("shot.webp")));
 });
+
+test("collectTurnImagePaths drops the user's own upload echoed from session assets", () => {
+  const cwd = join(homedir(), "proj");
+  const sessionId = "sess-1";
+  const upload = join(grokSessionAssetsDir(cwd, sessionId), "image-user.jpg");
+  const paths = collectTurnImagePaths({
+    scanText: `saved your photo at ${upload}`,
+    cwd,
+    sessionId,
+    since: Date.now(),
+  });
+  assert.equal(paths.some((p) => p.endsWith("image-user.jpg")), false);
+});

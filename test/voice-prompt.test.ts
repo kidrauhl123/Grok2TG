@@ -43,12 +43,11 @@ test("mergeInputs preserves skipSelfRecheck from any item", () => {
   assert.equal(mergeInputs([meta]).skipSelfRecheck, true);
 });
 
-test("buildContentBlocks appends imageOutput then progress", () => {
+test("buildContentBlocks appends imageOutput after the prompt", () => {
   const blocks = buildContentBlocks(textPrompt("hi"), {
     imageOutput: "IMAGE OUTPUT RULES:\nkeep in session",
-    progress: "PROGRESS REPORTING",
   });
   const text = blocks.find((b) => b.type === "text")?.text ?? "";
   assert.match(text, /hi/);
-  assert.ok(text.indexOf("IMAGE OUTPUT") < text.indexOf("PROGRESS REPORTING"));
+  assert.ok(text.indexOf("hi") < text.indexOf("IMAGE OUTPUT"));
 });

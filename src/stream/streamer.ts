@@ -13,8 +13,7 @@
 import type { Api } from "grammy";
 import { chunkMarkdown } from "../render/chunk.js";
 import { toTelegramMarkdown } from "../render/markdown.js";
-import { extractProgress, progressBar } from "../render/progress.js";
-import { estimateProgress } from "../render/progress-estimate.js";
+import { stripProgressMarkers } from "../render/progress.js";
 import { stripTelegramActionFences } from "../render/telegram-bridge.js";
 import { truncateMiddle } from "../render/truncate.js";
 import { safeEdit, safeSend } from "../bot/telegram-io.js";
@@ -68,8 +67,6 @@ export function shouldPulseLiveness(opts: {
 export interface StreamerOptions {
   /** Chat-like mode: drop thoughts/tools/plan; only stream agent prose. */
   proseOnly?: boolean;
-  /** When false, never render a progress bar (manager chat). Default true. */
-  showProgressBar?: boolean;
   /**
    * Pre-posted message id to edit in place (e.g. General "Thinking…" placeholder).
    * Avoids a separate bubble when the first real tokens arrive.
@@ -85,23 +82,12 @@ export class ResponseStreamer {
   private dirty = false;
   private flushing = false;
   private closed = false;
-  /** Latest task-progress % parsed from the agent's `{progress: N%}` markers
-   *  (sticky across flushes; rendered as a bar on the live message). */
-  private progress: number | undefined;
-  /** True once the agent emitted a real `{progress}` marker — from then on its
-   *  values are authoritative and the bot fallback stops contributing. */
-  private agentReported = false;
-  /** Real work signals for the fallback estimate (monotonic within a turn). */
-  private toolCalls = 0;
-  private outChars = 0;
-  private thoughtChars = 0;
   /**
-   * Active plan board (ACP sessionUpdate "plan"). Always rendered just above
-   * the progress bar when set — done / in-progress / pending steps.
+   * Active plan board (ACP sessionUpdate "plan"), rendered above the liveness
+   * line when set — done / in-progress / pending steps.
    */
   private planMarkdown: string | undefined;
   private readonly proseOnly: boolean;
-  private readonly showProgressBar: boolean;
   /** Wall clock of last real agent content (not liveness pulses). */
   private lastContentAt = Date.now();
   /** Sticky "still working" line while long tools emit no ACP updates. */
@@ -115,17 +101,11 @@ export class ResponseStreamer {
     private readonly throttleMs: number,
     private replyTo?: number,
     private footer?: string,
-    private readonly onProgress?: (pct: number) => void,
-    /** Show a bot-computed bar when the agent emits no marker. */
-    private readonly fallbackEnabled = false,
-    /** Turn start time, used by the fallback's elapsed-time signal. */
-    private readonly turnStartedAt = Date.now(),
     /** Forum topic thread — required so stream edits land in the right topic. */
     private readonly messageThreadId?: number,
     opts?: StreamerOptions,
   ) {
     this.proseOnly = !!opts?.proseOnly;
-    this.showProgressBar = opts?.showProgressBar !== false;
     if (opts?.seedMessageId !== undefined) this.liveId = opts.seedMessageId;
   }
 
@@ -172,49 +152,9 @@ export class ResponseStreamer {
     return this.footer ? `\n\n${this.footer}` : "";
   }
 
-  /** Strip `{progress: N%}` markers and telegram action JSON fences from
-   *  rendered text, remembering the latest progress value. */
+  /** Strip telegram action JSON fences and any leftover progress marker. */
   private captureProgress(text: string): string {
-    const withoutTg = stripTelegramActionFences(text);
-    const { value, cleaned } = extractProgress(withoutTg);
-    if (value !== undefined) this.setProgressValue(value, true);
-    return cleaned;
-  }
-
-  /** Record a progress value, enforcing global monotonicity (never decreases)
-   *  and notifying the owner on change. Agent markers are authoritative: once
-   *  one arrives, the bot fallback stops contributing. */
-  private setProgressValue(pct: number, fromAgent: boolean): void {
-    if (!this.showProgressBar) return;
-    if (fromAgent) this.agentReported = true;
-    const next = Math.max(this.progress ?? 0, Math.round(pct));
-    if (next === this.progress) return;
-    this.progress = next;
-    try {
-      this.onProgress?.(next);
-    } catch {
-      /* non-fatal */
-    }
-  }
-
-  /** Advance the fallback estimate from real activity signals, but only while
-   *  the agent itself hasn't reported a value. No-op when fallback is off. */
-  private applyFallback(): void {
-    if (!this.showProgressBar || !this.fallbackEnabled || this.agentReported) return;
-    const est = estimateProgress({
-      toolCalls: this.toolCalls,
-      outputChars: this.outChars,
-      thoughtChars: this.thoughtChars,
-      elapsedMs: Date.now() - this.turnStartedAt,
-    });
-    if (est > 0) this.setProgressValue(est, false);
-  }
-
-  /** Called when the turn finishes successfully: if the agent never reported
-   *  its own progress, fill the fallback bar to 100. No-op otherwise. */
-  completeFallback(): void {
-    if (!this.showProgressBar || !this.fallbackEnabled || this.agentReported) return;
-    this.setProgressValue(100, false);
+    return stripProgressMarkers(stripTelegramActionFences(text));
   }
 
   private threadExtra(): Record<string, unknown> {
@@ -235,7 +175,6 @@ export class ResponseStreamer {
 
   appendOutput(text: string): void {
     if (!text) return;
-    this.outChars += text.length;
     this.merge("out", text);
     this.noteRealContent();
     this.schedule();
@@ -243,7 +182,6 @@ export class ResponseStreamer {
 
   appendThought(text: string): void {
     if (!text || this.proseOnly) return;
-    this.thoughtChars += text.length;
     this.merge("think", text);
     this.noteRealContent();
     this.schedule();
@@ -255,7 +193,6 @@ export class ResponseStreamer {
    */
   addTool(rawMarkdown: string): void {
     if (!rawMarkdown || this.proseOnly) return;
-    this.toolCalls += 1;
     this.segs.push({ kind: "tool", text: rawMarkdown });
     this.noteRealContent();
     this.schedule(true);
@@ -298,7 +235,6 @@ export class ResponseStreamer {
         }
       }
     }
-    this.toolCalls += 1;
     this.segs.push({ kind: "tool", text: rawMarkdown, toolId: id || undefined });
     this.noteRealContent();
     this.schedule(true);
@@ -397,15 +333,13 @@ export class ResponseStreamer {
     try {
       await this.sealOverflow();
       const base = this.captureProgress(renderSegs(this.segs.slice(this.sealedIdx)));
-      this.applyFallback();
       // Never send an empty / progress-only bubble. Plan alone is allowed so the
       // board is visible as soon as the agent publishes steps.
       if (!base.trim() && !this.planMarkdown && !this.livenessLine) return;
-      // Live bubble: body → plan → progress → liveness (silent tools) → footer.
+      // Live bubble: body → plan → liveness (silent tools) → footer.
       const parts: string[] = [];
       if (base.trim()) parts.push(base);
       if (!this.proseOnly && this.planMarkdown) parts.push(this.planMarkdown);
-      if (this.showProgressBar && this.progress !== undefined) parts.push(progressBar(this.progress));
       if (this.livenessLine) parts.push(this.livenessLine);
       if (parts.length === 0) return;
       const src = `${parts.join("\n\n")}${this.footerSuffix()}`;
@@ -484,7 +418,27 @@ function quoteThought(text: string): string {
     .replace(/__/g, "")
     .replace(/~~/g, "");
   const short = truncateMiddle(safe, THINK_DISPLAY_MAX);
-  const lines = short.split("\n");
+  // A thought is usually one paragraph with no line breaks, and a single line
+  // cannot collapse. Wrap it so the first line stays visible and the rest folds.
+  const lines = wrapWords(short, 100);
   // Plain "thinking:" (no nested *bold*) — nested markers break mid-stream.
   return lines.map((l, i) => (i === 0 ? `> \u{1F4AD} thinking: ${l}` : `> ${l}`)).join("\n");
+}
+
+/** Break a paragraph into lines on spaces, keeping each line within `width`. */
+function wrapWords(text: string, width: number): string[] {
+  const out: string[] = [];
+  for (const para of text.split("\n")) {
+    const words = para.split(/\s+/).filter((w) => w.length > 0);
+    let line = "";
+    for (const word of words) {
+      if (line.length > 0 && line.length + 1 + word.length > width) {
+        out.push(line);
+        line = "";
+      }
+      line = line ? `${line} ${word}` : word;
+    }
+    if (line) out.push(line);
+  }
+  return out.length > 0 ? out : [""];
 }

@@ -4,7 +4,7 @@
  *   auth -> menu buttons -> wizard input -> commands -> photos -> text prompt.
  */
 import { Bot } from "grammy";
-import type { GrokClient } from "../grok/client.js";
+import type { GrokPool } from "../grok/pool.js";
 import { AccountManager } from "../app/accounts.js";
 import { AccountRotatorImpl } from "./account-rotator.js";
 import { SettingsStore } from "../app/settings-store.js";
@@ -50,7 +50,6 @@ import { PlanExitService } from "./plan-exit-service.js";
 import { StatusPanel } from "./menu/status-panel.js";
 import { sendMarkdownDoc } from "./telegram-io.js";
 import { Ephemeral } from "./menu/ephemeral.js";
-import { BAR_LABELS } from "./menu/keyboard.js";
 import { PermissionService } from "./permission-service.js";
 import { RuntimeRegistry } from "./registry.js";
 import { TaskWizard } from "./wizard/task-wizard.js";
@@ -80,7 +79,7 @@ export interface BotBundle {
   updater: Updater;
 }
 
-export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBundle> {
+export async function createBot(cfg: AppConfig, pool: GrokPool): Promise<BotBundle> {
   const bot = new Bot(cfg.token);
 
   // Quiet mode (default): silence every outgoing message unless the caller
@@ -98,9 +97,9 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
 
   const settings = new SettingsStore(cfg.dataDir);
   const store = new SessionStore(cfg.sessionsDir);
-  const registry = new RuntimeRegistry(bot.api, acp, cfg, settings, store);
+  const registry = new RuntimeRegistry(bot.api, pool, cfg, settings, store);
   const tasks = new TaskStore(cfg.dataDir);
-  const taskRunner = new TaskRunner(bot.api, acp);
+  const taskRunner = new TaskRunner(bot.api, pool);
   const wizard = new TaskWizard(tasks);
   const statusPanel = new StatusPanel(bot.api, settings, registry);
   registry.setRefresher((chatId) => void statusPanel.refresh(chatId));
@@ -176,7 +175,7 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
   const deps: BotDeps = {
     api: bot.api,
     cfg,
-    acp,
+    pool,
     registry,
     store,
     projects,
@@ -199,7 +198,7 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
   };
 
   // Auto-rotate-on-give-up: let a stuck turn cycle through other saved logins.
-  registry.setAccountRotator(new AccountRotatorImpl(deps.accounts, acp));
+  registry.setAccountRotator(new AccountRotatorImpl(deps.accounts, pool));
 
   // Permission handling: default is auto-approve (prefer "this session" / always).
   // Interactive Approve/Deny buttons only when both trust-all and auto-approve are off.
@@ -213,21 +212,24 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
   const permissions = new PermissionService(bot.api, registry, autoApprovePerms, {
     onUnpinned: (chatId) => statusPanel.ensurePinned(chatId),
   });
-  acp.permissionHandler = (p) => permissions.handle(p);
 
   const planExit = new PlanExitService(bot.api, registry, cfg.autoApprovePlan, (chatId) =>
     statusPanel.ensurePinned(chatId),
   );
-  acp.planExitHandler = (params) => planExit.handle(params);
 
   const askUser = new AskUserService(bot.api, registry, cfg.askUserAutoSkip);
-  acp.askUserHandler = (params) => askUser.handle(params);
   // /stop and /cancel must cancel pending interactive permissions / interviews
   // for that session only (ACP requires settled outcomes) — never kill the agent.
-  acp.onSessionCancel = (sessionId) => {
-    permissions.cancelForSession(sessionId);
-    askUser.cancelForSession(sessionId);
-  };
+  // Applied to every per-session process, including ones started later.
+  pool.setHandlers({
+    permissionHandler: (p) => permissions.handle(p),
+    planExitHandler: (params) => planExit.handle(params),
+    askUserHandler: (params) => askUser.handle(params),
+    onSessionCancel: (sessionId) => {
+      permissions.cancelForSession(sessionId);
+      askUser.cancelForSession(sessionId);
+    },
+  });
 
   // The bot pins/unpins the status panel, and Telegram emits a "pinned a
   // message" service message for each pin. Delete those so the chat stays clean
@@ -238,18 +240,6 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
   // Answer callback queries safely: never throw on stale IDs, auto-answer if a
   // handler forgets (prevents the loading spinner + unhandled 400 noise).
   bot.use(safeCallbackMiddleware());
-
-  // Keep history clean: delete the user's command (/…) and persistent-bar
-  // button taps INSTANTLY (before handlers) so slow ACP/CLI work never leaves
-  // the raw slash sitting in chat. Handlers post bot status messages instead.
-  // Plain prompts are adopted separately (see prompt-anchor.ts).
-  bot.on("message:text", async (ctx, next) => {
-    const text = ctx.message?.text ?? "";
-    if (text.startsWith("/") || BAR_LABELS.includes(text)) {
-      void ctx.deleteMessage().catch(() => {});
-    }
-    await next();
-  });
 
   bot.callbackQuery(/^perm:(\d+):(\d+)$/, async (ctx) => {
     // resolveChoice unpins the prompt; we then rewrite it to the chosen label.
@@ -455,8 +445,11 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
     projectRoot: cfg.projectRoot,
     instanceDir: INSTANCE_DIR,
     dataDir: cfg.dataDir,
-    isPromptInFlight: () => acp.hasInflightPrompt(),
-    otherActiveSessions: () => store.listActive().filter((s) => s.lockPid !== acp.pid).length,
+    isPromptInFlight: () => pool.liveClients().some((c) => c.hasInflightPrompt()),
+    otherActiveSessions: () => {
+      const mine = new Set(pool.pids());
+      return store.listActive().filter((s) => !s.lockPid || !mine.has(s.lockPid)).length;
+    },
     announce: async (text, markdown) => {
       for (const id of settings.chatIds()) {
         try {
@@ -474,7 +467,7 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
         /* ignore */
       }
       try {
-        acp.stop();
+        pool.stop();
       } catch {
         /* ignore */
       }

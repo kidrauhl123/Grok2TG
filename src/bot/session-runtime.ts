@@ -14,10 +14,10 @@ import {
   isTransientError,
   type SessionMetadata,
 } from "../grok/client.js";
+import type { GrokPool } from "../grok/pool.js";
 import type { AccountRotator } from "./account-rotator.js";
 import { contentText, type ContentBlock, type PromptResult, type SessionUpdate } from "../grok/types.js";
 import type { AppConfig } from "../config.js";
-import { reasoningDirective } from "../app/reasoning.js";
 import type { SettingsStore } from "../app/settings-store.js";
 import { type PromptInput, type ReasoningEffort, textPrompt } from "../app/types.js";
 import { createLogger } from "../logger.js";
@@ -107,7 +107,6 @@ import {
   cleanCommentLine,
   cleanUserPreview,
   COMMENT_MAX,
-  stepFromThought,
   stepFromToolUpdate,
   stripDirectiveWrappers,
 } from "../render/session-comment.js";
@@ -175,9 +174,6 @@ export class SessionRuntime {
   /** The full Done/summary of the most recent finished turn, replayed when you
    *  switch (back) into this session so you see how it ended. */
   private lastCompletion: string | undefined;
-  /** Latest task-completion % parsed from the agent's `{progress: N%}` markers,
-   *  shown as a bar in the status panel and session cards. Reset each turn. */
-  private progress: number | undefined;
   /** Subagent sessionId -> last status key shown this turn (dedupe). */
   private subagentShown = new Map<string, string>();
   /** Child ACP sessions spawned for this busy turn — mirror their updates. */
@@ -197,6 +193,8 @@ export class SessionRuntime {
   private sentImagesThisTurn = new Set<string>();
   /** Monotonic count used to reject ACP "success" responses with no turn updates. */
   private sessionUpdateCount = 0;
+  /** A session/update that means the turn did real work even with no text. */
+  private sawTurnActivity = false;
   private readonly listener: (sessionId: string, update: SessionUpdate) => void;
   private readonly planExitListener: (sessionId: string | undefined, result: unknown) => void;
   private primingContext: string | undefined;
@@ -342,7 +340,7 @@ export class SessionRuntime {
   constructor(
     private readonly api: Api,
     private readonly chatId: number,
-    private readonly acp: GrokClient,
+    private readonly pool: GrokPool,
     private readonly cfg: AppConfig,
     private readonly settings: SettingsStore,
     init?: {
@@ -370,16 +368,24 @@ export class SessionRuntime {
     }
     if (this.sessionId) this.rebindPending = true; // lazily reload on first use
 
-    this.typing = new TypingIndicator(api, chatId);
+    this.typing = new TypingIndicator(api, chatId, this.messageThreadId);
     this.listener = (sid, update) => this.onUpdate(sid, update);
-    this.acp.on("session-update", this.listener);
+    this.pool.on("session-update", this.listener);
     this.planExitListener = (sid, result) => this.onPlanExit(sid, result);
-    this.acp.on("plan-exit", this.planExitListener);
+    this.pool.on("plan-exit", this.planExitListener);
     this.restartListener = () => {
       this.sessionLive = false;
       if (this.sessionId) this.rebindPending = true;
     };
-    this.acp.on("restarted", this.restartListener);
+    this.pool.on("restarted", this.restartListener);
+  }
+
+  /**
+   * The agent process that owns THIS session. Sessions never share a process:
+   * one stuck prompt can no longer stall every topic.
+   */
+  private get acp(): GrokClient {
+    return this.pool.clientFor(this.sessionId);
   }
 
   get isBusy(): boolean {
@@ -398,13 +404,6 @@ export class SessionRuntime {
   /** The Done/summary of this session's most recent finished turn, if any. */
   get lastTurnSummary(): string | undefined {
     return this.lastCompletion;
-  }
-
-  /** Latest task-completion % (0–100) parsed this turn, or undefined if none. */
-  get taskProgress(): number | undefined {
-    // Manager chat never shows a progress bar.
-    if (this.managerMode) return undefined;
-    return this.progress;
   }
 
   /**
@@ -472,16 +471,6 @@ export class SessionRuntime {
       busy: this.busy,
     });
     return built || undefined;
-  }
-
-  /** Record a new progress value and refresh the status panel / cards. The bar
-   *  is monotonic within a turn (it's reset to undefined when a new turn starts),
-   *  so a streamer recreated mid-turn can't make it jump backwards. */
-  private setProgress(pct: number): void {
-    const next = Math.max(this.progress ?? 0, pct);
-    if (next === this.progress) return;
-    this.progress = next;
-    this.changed();
   }
 
   /** Update the live step (tools/plan) — kept for diagnostics; cards use user+thinking. */
@@ -571,9 +560,6 @@ export class SessionRuntime {
           this.cfg.streamThrottleMs,
           this.turnReplyTo,
           this.hashtags(),
-          (pct) => this.setProgress(pct),
-          this.cfg.progressFallback,
-          this.turnStartedAt,
           this.messageThreadId,
         );
         // Restore the live plan board so steps stay visible above the progress bar.
@@ -620,9 +606,9 @@ export class SessionRuntime {
   }
 
   dispose(): void {
-    this.acp.off("session-update", this.listener);
-    this.acp.off("plan-exit", this.planExitListener);
-    this.acp.off("restarted", this.restartListener);
+    this.pool.off("session-update", this.listener);
+    this.pool.off("plan-exit", this.planExitListener);
+    this.pool.off("restarted", this.restartListener);
     this.typing.stop();
     this.stopActivityHeartbeat();
     this.stopLivenessPulse();
@@ -678,7 +664,9 @@ export class SessionRuntime {
    */
   private async bindNewSession(cwd: string, projectName?: string): Promise<void> {
     this.stopWatch();
-    this.sessionId = await this.acp.newSession(cwd);
+    const client = await this.pool.acquire();
+    this.sessionId = await client.newSession(cwd);
+    this.pool.bind(this.sessionId, client);
     this.sessionLive = true;
     this.rebindPending = false;
     this.cwd = cwd;
@@ -707,7 +695,9 @@ export class SessionRuntime {
     }
     if (this.busy) await this.cancel();
     this.stopWatch();
-    await this.acp.loadSession(sessionId, cwd);
+    const client = await this.pool.acquire();
+    await client.loadSession(sessionId, cwd);
+    this.pool.bind(sessionId, client);
     this.sessionId = sessionId;
     this.sessionLive = true;
     this.rebindPending = false;
@@ -797,6 +787,11 @@ export class SessionRuntime {
   setReasoningPref(effort: ReasoningEffort): void {
     this.settings.updateKey(this.settingsKey, { reasoning: effort });
     this.changed();
+    if (this.sessionLive && this.sessionId) {
+      void this.acp.setReasoningEffort(this.sessionId, effort).catch((e: Error) => {
+        log.warn(`set reasoning effort (${effort}) failed: ${e.message}`);
+      });
+    }
   }
 
   setPreferredAccountId(id: string | undefined): void {
@@ -830,6 +825,13 @@ export class SessionRuntime {
         await this.acp.setModel(this.sessionId, cur.model);
       } catch (e) {
         log.debug(`apply model failed: ${(e as Error).message}`);
+      }
+    }
+    if (this.sessionId && cur.reasoning) {
+      try {
+        await this.acp.setReasoningEffort(this.sessionId, cur.reasoning);
+      } catch (e) {
+        log.debug(`apply reasoning effort failed: ${(e as Error).message}`);
       }
     }
   }
@@ -1047,8 +1049,10 @@ export class SessionRuntime {
   private async rebindWithRetries(sessionId: string, attempts = 4): Promise<boolean> {
     const delays = [400, 1200, 3000]; // ~4.6s total before giving up
     for (let i = 0; i < attempts; i++) {
+      const client = await this.pool.acquire();
       try {
-        await this.acp.loadSession(sessionId, this.cwd);
+        await client.loadSession(sessionId, this.cwd);
+        this.pool.bind(sessionId, client);
         this.loadPersistedComment();
         return true;
       } catch (err) {
@@ -1149,7 +1153,6 @@ export class SessionRuntime {
     this.ownedSubagentIds = new Set();
     this.subagentThinkPulse = new Map();
     this.subagentToolCache = new Map();
-    this.progress = undefined; // a new turn = a new task; clear the old bar
     this.planEntries = undefined; // plan board is per-turn
     this.pendingSuggestions = undefined; // new work supersedes previous Done suggestions
     this.setLiveStep(
@@ -1203,17 +1206,16 @@ export class SessionRuntime {
           this.cfg.streamThrottleMs,
           this.turnReplyTo,
           this.hashtags(),
-          this.managerMode && !rawSlash ? undefined : (pct) => this.setProgress(pct),
-          this.managerMode && !rawSlash ? false : this.cfg.progressFallback,
-          startedAt,
           this.messageThreadId,
           this.managerMode && rawSlash
-            ? { proseOnly: true, showProgressBar: false }
+            ? { proseOnly: true }
             : undefined,
         )
       : undefined;
     // Seed a live bubble immediately so the Working / subagent cards have a
     // message to edit before the first ACP chunk (long crew waits).
+    // The user message is kept, so this must be a new bot message: bots cannot
+    // edit someone else's message, and thinking would otherwise never appear.
     if (this.streamer && live && !this.managerMode) {
       void this.streamer.ensureLiveSurface("\u23F3 Working\u2026").catch(() => {});
     }
@@ -1237,15 +1239,11 @@ export class SessionRuntime {
     this.sentImagesThisTurn = new Set();
 
     const content = buildContentBlocks(input, {
-      reasoning: reasoningDirective(this.reasoning),
       priming: this.primingContext,
       imageOutput:
         !this.managerMode && this.cfg.sendAgentImages
           ? IMAGE_OUTPUT_DIRECTIVE
           : undefined,
-      // Manager chat: no progress spam; project topics keep the usual directive.
-      progress:
-        !this.managerMode && this.cfg.showProgress ? PROGRESS_DIRECTIVE : undefined,
     });
     this.primingContext = undefined;
 
@@ -1265,9 +1263,6 @@ export class SessionRuntime {
       const resumed = await this.maybeResumeAfterStream(final);
       if (resumed) final = resumed;
       const streamedOutput = this.streamer?.hasOutput ?? false;
-      // On a successful, non-cancelled turn, top the fallback bar up to 100 (a
-      // no-op when the agent reported its own progress — its value is kept).
-      if (final.result && !this.cancelled) this.streamer?.completeFallback();
       if (this.streamer) await this.streamer.finalize();
       if (this.foreground) await this.sendTurnImages();
 
@@ -1641,10 +1636,6 @@ export class SessionRuntime {
       this.activity(false);
       // The in-flight turn we may have been following live is over.
       if (this.watchIsFollow) this.stopWatch();
-      // Turn ended (done / stopped / error): drop the live task-progress value so
-      // the bar is removed from the status panel, session cards and switch
-      // messages. The finished streamed bubble keeps its own (frozen) bar.
-      this.progress = undefined;
       this.planEntries = undefined;
       // Idle cards show last user prompt only (clear live step / thinking).
       this.cardThinking = "";
@@ -2337,11 +2328,8 @@ export class SessionRuntime {
       this.subagentShown = new Map();
       this.streamer?.setFooter(this.hashtags());
       const retryContent = buildContentBlocks(input, {
-        reasoning: reasoningDirective(this.reasoning),
         priming: this.primingContext,
         imageOutput: this.cfg.sendAgentImages ? IMAGE_OUTPUT_DIRECTIVE : undefined,
-        progress:
-          !this.managerMode && this.cfg.showProgress ? PROGRESS_DIRECTIVE : undefined,
       });
       this.primingContext = undefined;
       log.info(
@@ -2401,11 +2389,8 @@ export class SessionRuntime {
     this.subagentShown = new Map();
     this.streamer?.setFooter(this.hashtags()); // streamed reply tags the NEW session
     const forkContent = buildContentBlocks(input, {
-      reasoning: reasoningDirective(this.reasoning),
       priming: transcript ? buildPriming(transcript) : undefined,
       imageOutput: this.cfg.sendAgentImages ? IMAGE_OUTPUT_DIRECTIVE : undefined,
-      progress:
-          !this.managerMode && this.cfg.showProgress ? PROGRESS_DIRECTIVE : undefined,
     });
     return this.runPromptWithRetries(forkContent);
   }
@@ -2454,11 +2439,8 @@ export class SessionRuntime {
         this.subagentShown = new Map();
         this.streamer?.setFooter(this.hashtags());
         const content = buildContentBlocks(input, {
-          reasoning: reasoningDirective(this.reasoning),
           priming: transcript ? buildPriming(transcript) : undefined,
           imageOutput: this.cfg.sendAgentImages ? IMAGE_OUTPUT_DIRECTIVE : undefined,
-          progress:
-          !this.managerMode && this.cfg.showProgress ? PROGRESS_DIRECTIVE : undefined,
         });
         return this.runPromptWithRetries(content);
       }
@@ -2502,11 +2484,8 @@ export class SessionRuntime {
       this.subagentShown = new Map();
       this.streamer?.setFooter(this.hashtags());
       const content = buildContentBlocks(input, {
-        reasoning: reasoningDirective(this.reasoning),
         priming: transcript ? buildPriming(transcript) : undefined,
         imageOutput: this.cfg.sendAgentImages ? IMAGE_OUTPUT_DIRECTIVE : undefined,
-      progress:
-          !this.managerMode && this.cfg.showProgress ? PROGRESS_DIRECTIVE : undefined,
       });
       log.info(
         `chat ${this.chatId} auto-rotating to account ${t.label}` +
@@ -2552,6 +2531,7 @@ export class SessionRuntime {
       attempt++;
       try {
         const updatesBeforePrompt = this.sessionUpdateCount;
+        this.sawTurnActivity = false;
         const result = await this.acp.prompt(this.sessionId!, content);
         // User /stop force-complete or agent honouring session/cancel often
         // returns cancelled with zero session/update chunks — that is success.
@@ -2563,7 +2543,9 @@ export class SessionRuntime {
         // report a successful end-turn after an upstream model failure; never
         // present that as a completed user request.
         await sleep(0);
-        if (this.sessionUpdateCount === updatesBeforePrompt) {
+        // A slash builtin such as /compact finishes with only a compaction
+        // event and no text. That is the command succeeding, not an empty turn.
+        if (this.sessionUpdateCount === updatesBeforePrompt && !this.sawTurnActivity) {
           throw new Error("Empty agent response — Grok ended the turn without any output or tool activity");
         }
         return { result, attempts: attempt };
@@ -2634,10 +2616,7 @@ export class SessionRuntime {
     const sessionId = this.sessionId;
     const delays = this.cfg.promptRetryAttempts > 0 ? backoffSchedule(this.cfg.promptRetryAttempts) : [RETRY_BASE_MS];
     const resumeContent = buildContentBlocks(textPrompt(RESUME_INSTRUCTION), {
-      reasoning: reasoningDirective(this.reasoning),
       imageOutput: this.cfg.sendAgentImages ? IMAGE_OUTPUT_DIRECTIVE : undefined,
-      progress:
-          !this.managerMode && this.cfg.showProgress ? PROGRESS_DIRECTIVE : undefined,
     });
 
     let last = final;
@@ -2930,6 +2909,9 @@ export class SessionRuntime {
     }
     this.sessionUpdateCount++;
     const kind = update.sessionUpdate;
+    if (kind === "auto_compact_completed" || kind === "compaction_checkpoint") {
+      this.sawTurnActivity = true;
+    }
 
     // Quiet meta turns (follow-up suggestions): capture prose only, never stream.
     if (this.capturingQuiet) {
@@ -2975,11 +2957,8 @@ export class SessionRuntime {
         this.turnAssistantText += text;
       }
     } else if (kind === "agent_thought_chunk") {
-      const text = contentText(update.content);
-      if (text?.trim()) {
-        this.appendCardThinking(text);
-        this.setLiveStep(stepFromThought(text));
-      }
+      // Thought text is already the quoted block in the live bubble.
+      // Do not also mirror it as a live step or session-card line.
     } else if (kind === "plan") {
       // Always track plan entries (background too) so switch-to-live restores the board.
       const entries = parsePlanUpdate(update);

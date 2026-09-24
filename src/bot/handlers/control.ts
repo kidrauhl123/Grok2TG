@@ -10,7 +10,6 @@ import { basename } from "node:path";
 import { textPrompt } from "../../app/types.js";
 import type { BotDeps } from "../deps.js";
 import { HELP_TEXT } from "../commands.js";
-import { compactKeyboard } from "../menu/keyboard.js";
 import { refreshMenu } from "../menu/refresh.js";
 import { adoptUserPrompt } from "../prompt-anchor.js";
 import { extractReplyContext } from "../reply-context.js";
@@ -20,21 +19,19 @@ import { openMainMenu } from "./menu.js";
 export function registerControl(bot: Bot, deps: BotDeps): void {
   bot.command("start", async (ctx) => {
     const scope = resolveScope(ctx, deps);
-    const agent = deps.acp.agentInfo;
+    const agent = deps.pool.clientFor(undefined).agentInfo;
     const isGroup = ctx.chat.type === "group" || ctx.chat.type === "supergroup";
     const lines = [
       "\u{1F44B} Welcome! I bridge Telegram to Grok Build over ACP.",
       agent?.name ? `Connected to ${agent.name} ${agent.version ?? ""}`.trim() : "",
       "",
-      isGroup || scope.isForum
-        ? "In groups / topics: /menu for controls, /cancel or /stop to halt a turn."
-        : "Bar: \u2630 Menu \u00B7 \u{1F195} New session \u00B7 \u{1F9ED} Running \u00B7 \u23F9 Stop. Live status panel while I work",
+      "Commands: /menu \u00B7 /new \u00B7 /stop \u00B7 /cancel.",
       isGroup || scope.isForum
         ? "Just send a message in this topic to start."
-        : "(\u2630 Menu \u2192 Status shows it anytime). Just send a message to start.",
+        : "Just send a message to start.",
     ].filter(Boolean);
     await ctx.reply(lines.join("\n"), {
-      reply_markup: compactKeyboard(),
+      reply_markup: { remove_keyboard: true },
       ...scope.threadExtra,
     });
     await deps.statusPanel.refresh(ctx.chat.id);

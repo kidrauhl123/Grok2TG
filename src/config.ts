@@ -145,6 +145,8 @@ export interface AppConfig {
   grokBaseUrl?: string;
   /** Default model for new sessions (e.g. grok-4-1-fast). */
   grokModel: string;
+  /** Optional `grok agent --reasoning-effort` value. */
+  reasoningEffort?: string;
   /** Optional max output tokens (exported as GROK_MAX_TOKENS). */
   grokMaxTokens?: number;
   /** Cap on tool-execution rounds per headless turn (grok --max-tool-rounds). */
@@ -211,8 +213,6 @@ export interface AppConfig {
   mcpProbeTimeoutMs: number;
   mcpProbeConcurrency: number;
   showSubagents: boolean;
-  showProgress: boolean;
-  progressFallback: boolean;
   notifyOtherSessions: boolean;
   autoUpdate: boolean;
   updateCheckMs: number;
@@ -333,6 +333,7 @@ export function loadConfig(): AppConfig {
     grokApiKey: process.env.XAI_API_KEY?.trim() || process.env.GROK_API_KEY?.trim() || undefined,
     grokBaseUrl: process.env.GROK_BASE_URL?.trim() || undefined,
     grokModel: process.env.GROK_MODEL?.trim() || "grok-4.5",
+    reasoningEffort: process.env.GROK_REASONING_EFFORT?.trim() || undefined,
     grokMaxTokens: process.env.GROK_MAX_TOKENS ? num(process.env.GROK_MAX_TOKENS, 0) || undefined : undefined,
     maxToolRounds: num(process.env.GROK_MAX_TOOL_ROUNDS, 400),
     agent: process.env.GROK_AGENT?.trim() || undefined,
@@ -379,8 +380,6 @@ export function loadConfig(): AppConfig {
     mcpProbeTimeoutMs: num(process.env.MCP_PROBE_TIMEOUT_MS, 8000),
     mcpProbeConcurrency: num(process.env.MCP_PROBE_CONCURRENCY, 6),
     showSubagents: bool(process.env.SHOW_SUBAGENTS, true),
-    showProgress: bool(process.env.SHOW_PROGRESS, true),
-    progressFallback: bool(process.env.PROGRESS_FALLBACK, true),
     notifyOtherSessions: bool(process.env.NOTIFY_OTHER_SESSIONS, true),
     autoUpdate: bool(process.env.AUTO_UPDATE, true),
     updateCheckMs: num(process.env.UPDATE_CHECK_MS, 3_600_000),

@@ -8,11 +8,10 @@
  * rapid consecutive text messages per chat within a short debounce window
  * (`MESSAGE_BATCH_MS`) into a single prompt — one submission, one confirmation.
  *
- * Project topics: user messages are replaced by a bot-owned prompt anchor
- * (`#prompt_<id>`) so the chat shows immediate life while CLI/ACP starts.
+ * User messages are kept. AI replies thread to the user's own message.
+ * A bot anchor is only used when there is no user message to reply to.
  *
- * General (manager): user messages are KEPT; AI replies thread to the user
- * message. Each message is a NEW session (parallel), unless the user replies
+ * General (manager): each message is a NEW session (parallel), unless the user replies
  * to a bot message — then that session continues.
  */
 import type { Bot } from "grammy";
@@ -22,6 +21,7 @@ import {
   batchKey,
   forumThreadId,
   isGeneralThread,
+  outboundMessageThreadId,
   outboundThreadExtra,
 } from "../../forum/thread.js";
 import type { BotDeps } from "../deps.js";
@@ -29,6 +29,8 @@ import { adoptUserPrompt, newPromptId } from "../prompt-anchor.js";
 import { extractReplyContext } from "../reply-context.js";
 import { resolveForumRuntime } from "./forum.js";
 import type { SessionRuntime } from "../session-runtime.js";
+import { TypingIndicator } from "../typing.js";
+import { clearReplyKeyboard } from "../telegram-io.js";
 
 const log = createLogger("message");
 
@@ -44,8 +46,13 @@ interface TextBatch {
   replyToMessageId?: number;
   /** Text of the replied-to message (for #sess_ recovery). */
   replyToText?: string;
+  /** "typing…" shown from the first message, before the batch flushes. */
+  typing: TypingIndicator;
   timer: NodeJS.Timeout;
 }
+
+/** Chats/topics already told to drop their stale reply keyboard this process. */
+const keyboardCleared = new Set<string>();
 
 export function registerMessages(bot: Bot, deps: BotDeps): void {
   const batches = new Map<string, TextBatch>();
@@ -75,6 +82,15 @@ export function registerMessages(bot: Bot, deps: BotDeps): void {
       ? `${chatId}:${threadId ?? 1}:m${id}`
       : batchKey(chatId, rawThreadId, isForum);
 
+    // The reply keyboard used to be attached by default and a client keeps
+    // showing it until a message that stays in the chat carries
+    // remove_keyboard. Mark this topic so its next few real replies do that.
+    const clearedKey = `${chatId}:${outboundMessageThreadId(threadId) ?? 0}`;
+    if (!keyboardCleared.has(clearedKey)) {
+      keyboardCleared.add(clearedKey);
+      clearReplyKeyboard(chatId, outboundMessageThreadId(threadId));
+    }
+
     const batch = batches.get(key);
     if (batch) {
       clearTimeout(batch.timer);
@@ -95,6 +111,7 @@ export function registerMessages(bot: Bot, deps: BotDeps): void {
       quoted,
       replyToMessageId,
       replyToText,
+      typing: startTyping(deps, chatId, threadId),
       timer: arm(key),
     });
   });
@@ -105,6 +122,9 @@ async function flush(deps: BotDeps, batches: Map<string, TextBatch>, key: string
   const batch = batches.get(key);
   if (!batch) return;
   batches.delete(key);
+  // The session takes over the indicator from here (it restarts its own), so
+  // this early one must not keep firing after the reply goes out.
+  batch.typing.stop();
 
   const combined = batch.parts.join("\n").trim();
   if (!combined) return;
@@ -267,6 +287,12 @@ async function flush(deps: BotDeps, batches: Map<string, TextBatch>, key: string
       replyTo,
     );
   }
+}
+
+function startTyping(deps: BotDeps, chatId: number, threadId?: number): TypingIndicator {
+  const typing = new TypingIndicator(deps.api, chatId, threadId);
+  typing.start();
+  return typing;
 }
 
 async function send(

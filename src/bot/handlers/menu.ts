@@ -11,22 +11,12 @@ import { type Bot, type Context, InlineKeyboard } from "grammy";
 import { reasoningLabel } from "../../app/reasoning.js";
 import { REASONING_LEVELS, type ReasoningEffort } from "../../app/types.js";
 import type { BotDeps } from "../deps.js";
-import {
-  BAR_LABELS,
-  compactKeyboard,
-  mainMenuInline,
-  MENU_BTN,
-  NEW_BTN,
-  RUNNING_BTN,
-  STOP_BTN,
-} from "../menu/keyboard.js";
-import { refreshMenu } from "../menu/refresh.js";
+import { mainMenuInline } from "../menu/keyboard.js";
 import { resolveScope } from "../scope.js";
 import { showImportSources } from "./import-session.js";
 import { showKillConfirm } from "./kill.js";
 import { showMcp } from "./mcp.js";
 import { showProjects } from "./projects.js";
-import { showRunning } from "./running.js";
 import { showAccounts } from "./accounts.js";
 import { showSessions } from "./sessions.js";
 import { showTasks } from "./tasks.js";
@@ -56,39 +46,11 @@ export async function openMainMenu(ctx: Context, deps: BotDeps): Promise<void> {
 }
 
 export function registerMenu(bot: Bot, deps: BotDeps): void {
-  // Compact persistent bar.
-  bot.hears(BAR_LABELS, async (ctx) => {
-    deps.wizard.abort(ctx.chat.id);
-    const scope = resolveScope(ctx, deps);
-    switch (ctx.message?.text) {
-      case MENU_BTN:
-        return openMainMenu(ctx, deps);
-      case NEW_BTN: {
-        await ctx.reply("\u2728 Creating new session\u2026", scope.threadExtra).catch(() => {});
-        try {
-          await scope.controller.addNew(scope.rt.cwd, scope.rt.projectName);
-          return refreshMenu(ctx, deps, `\u2728 New session in ${scope.rt.projectName ?? scope.rt.cwd}`);
-        } catch (e) {
-          return void ctx.reply(`\u274C ${(e as Error).message}`, scope.threadExtra);
-        }
-      }
-      case RUNNING_BTN:
-        return showRunning(ctx, deps);
-      case STOP_BTN: {
-        const cancelled = await scope.rt.cancel();
-        return void ctx.reply(
-          cancelled ? "\u23F9 Cancelling current turn\u2026" : "Nothing is running.",
-          scope.threadExtra,
-        );
-      }
-    }
-  });
-
   // Inline menu actions.
   bot.callbackQuery(/^m:(\w+)$/, (ctx) => dispatchMenu(ctx, deps, ctx.match![1]!));
 
   // ── Reasoning ──────────────────────────────────────────────────────────────
-  bot.callbackQuery(/^reason:(minimal|low|medium|high|max)$/, async (ctx) => {
+  bot.callbackQuery(/^reason:(minimal|low|medium|high|xhigh)$/, async (ctx) => {
     const level = ctx.match![1] as ReasoningEffort;
     resolveScope(ctx, deps).rt.setReasoningPref(level);
     await confirm(ctx, deps, `\u{1F9E0} Reasoning: ${reasoningLabel(level)}`);
@@ -96,7 +58,7 @@ export function registerMenu(bot: Bot, deps: BotDeps): void {
 
   // ── Model ────────────────────────────────────────────────────────────────
   bot.callbackQuery(/^model:set:(\d+)$/, async (ctx) => {
-    const entry = deps.acp.availableModels[Number(ctx.match![1])];
+    const entry = deps.pool.clientFor(resolveScope(ctx, deps).rt.sessionId).availableModels[Number(ctx.match![1])];
     if (!entry) return void ctx.answerCallbackQuery({ text: "Expired, tap Model again." });
     await ctx.answerCallbackQuery({ text: `\u{1F9E9} Model: ${entry.name}` });
     const res = await resolveScope(ctx, deps).rt.setModelPref(entry.modelId);
@@ -115,7 +77,7 @@ export function registerMenu(bot: Bot, deps: BotDeps): void {
 /** Dispatch an inline-menu action (`m:<action>`). */
 async function dispatchMenu(ctx: Context, deps: BotDeps, action: string): Promise<void> {
   const scope = resolveScope(ctx, deps);
-  const { chatId, rt, controller, threadExtra, isForum, projectName, projectPath } = scope;
+  const { chatId, rt, isForum, projectName, projectPath } = scope;
   switch (action) {
     case "close":
       await ctx.answerCallbackQuery();
@@ -128,18 +90,15 @@ async function dispatchMenu(ctx: Context, deps: BotDeps, action: string): Promis
           `Model / reasoning / running sessions on this menu are for **this topic only**.`,
       );
     case "hidebar":
-      await ctx.answerCallbackQuery();
-      await ctx.deleteMessage().catch(() => {});
-      return void ctx.reply("\u{1F648} Bar hidden \u2014 send /menu to bring it back.", {
-        reply_markup: { remove_keyboard: true },
-        ...threadExtra,
-      });
     case "showbar":
-      await ctx.answerCallbackQuery();
-      return void ctx.reply("\u2328\uFE0F Bar restored.", {
-        reply_markup: compactKeyboard(),
-        ...threadExtra,
+    case "new":
+    case "running":
+    case "stop":
+      await ctx.answerCallbackQuery({
+        text: "That button is gone. Use /new, /running or /stop.",
+        show_alert: true,
       });
+      return;
     case "project":
       if (isForum) {
         await ctx.answerCallbackQuery({ text: "Project is fixed to this topic", show_alert: true });
@@ -147,9 +106,6 @@ async function dispatchMenu(ctx: Context, deps: BotDeps, action: string): Promis
       }
       await ctx.answerCallbackQuery();
       return showProjects(ctx, deps);
-    case "running":
-      await ctx.answerCallbackQuery();
-      return showRunning(ctx, deps);
     case "sessions":
       await ctx.answerCallbackQuery();
       return showSessions(ctx, deps);
@@ -189,29 +145,6 @@ async function dispatchMenu(ctx: Context, deps: BotDeps, action: string): Promis
     case "killall":
       await ctx.answerCallbackQuery();
       return showKillConfirm(ctx, deps);
-    case "new":
-      await ctx.answerCallbackQuery({ text: "Creating session\u2026" });
-      await ctx.reply("\u2728 Creating new session\u2026", threadExtra).catch(() => {});
-      try {
-        await controller.addNew(rt.cwd, rt.projectName);
-        return refreshMenu(ctx, deps, `\u2728 New session in ${rt.projectName ?? rt.cwd}`);
-      } catch (e) {
-        return void ctx.reply(`\u274C ${(e as Error).message}`, threadExtra);
-      }
-    case "stop": {
-      // Answer first so a slow cancel never times out the callback query.
-      const busy = rt.isBusy;
-      await ctx.answerCallbackQuery({ text: busy ? "Cancelling\u2026" : "Nothing is running" });
-      const cancelled = busy ? await rt.cancel() : false;
-      // Visible in-topic feedback (callback toasts are easy to miss in groups).
-      await ctx
-        .reply(
-          cancelled || busy ? "\u23F9 Cancelling current turn\u2026" : "Nothing is running.",
-          threadExtra,
-        )
-        .catch(() => {});
-      return;
-    }
     default:
       return void ctx.answerCallbackQuery();
   }
@@ -248,7 +181,8 @@ async function showModelMenu(ctx: Context, deps: BotDeps): Promise<void> {
   const rt = resolveScope(ctx, deps).rt;
   await ensureReady(ctx, rt);
   await deps.ephemeral.open(ctx);
-  const models = deps.acp.availableModels;
+  const client = deps.pool.clientFor(rt.sessionId);
+  const models = client.availableModels;
   if (models.length === 0) {
     await deps.ephemeral.reply(
       ctx,
@@ -256,7 +190,7 @@ async function showModelMenu(ctx: Context, deps: BotDeps): Promise<void> {
     );
     return;
   }
-  const current = rt.model || deps.acp.currentModelId;
+  const current = rt.model || client.currentModelId;
   const kb = new InlineKeyboard();
   models.forEach((m, i) => kb.text(`${m.modelId === current ? "\u2713 " : ""}${m.name}`, `model:set:${i}`).row());
   kb.text("Default (agent's model)", "model:clear");

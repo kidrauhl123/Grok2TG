@@ -33,7 +33,7 @@ import {
   OUTPUT_PREVIEW_LINES,
   type ToolDisplayKind,
 } from "./tool-call-detail.js";
-import { formatLiveTerminalOutput, truncateMiddle, truncateMiddleLines } from "./truncate.js";
+import { truncateHead, truncateMiddle, truncateMiddleLines } from "./truncate.js";
 
 const KIND_ICON: Record<string, string> = {
   read: "\u{1F4D6}", // 📖
@@ -178,6 +178,23 @@ function boldVerbPath(verb: string, path: string | undefined | null, fallback = 
   return "**" + verb + "** " + pathCode(path, fallback);
 }
 
+/**
+ * First line stays a normal quote; the remaining lines follow unquoted so the
+ * markdown renderer collapses only those. A single over-long line is cut,
+ * since a collapsed quote cannot shorten one line.
+ */
+function foldableBlock(marker: string, text: string): string {
+  const lines = text
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .split("\n")
+    .filter((line, i, all) => line.length > 0 || i < all.length - 1);
+  const [first = "", ...rest] = lines;
+  const head = `> ${marker}${truncateHead(first, 160)}`;
+  if (rest.length === 0) return head;
+  return `${head}\n${rest.join("\n")}`;
+}
+
 /** Fence that lengthens itself when the body contains backticks (avoids MD break). */
 function fence(text: string, lang?: string): string {
   let tickLen = 3;
@@ -219,18 +236,19 @@ function formatExecute(
   if (toolName && toolName !== "execute" && toolName !== "shell" && toolName !== "bash") {
     out += `\n  tool: \`${toolName}\``;
   }
-  if (cmd) out += "\n" + fence(truncateMiddle(cmd, PREVIEW_MAX), "bash") + "\n";
-  else {
-    // No command field — dump args so the user still sees what ran.
+  if (cmd) {
+    out += "\n" + foldableBlock("\u{1F4BB} command: ", cmd) + "\n";
+  } else {
+    // No command field — one line of args, not the whole dump.
     const args = formatArgLines(raw);
-    if (args) out += "\n" + fence(truncateMiddle(args, PREVIEW_MAX)) + "\n";
+    if (args) out += "\n" + foldableBlock("\u{1F4BB} command: ", args) + "\n";
   }
-  // Display: first output line + live tail (one block, updated in place via upsert).
-  // Full stdout remains in the agent session / merged tool snapshot.
+  // Display: the first lines of output, folded after the first. Full stdout
+  // remains in the agent session / merged tool snapshot.
   const result = extractToolOutput(u);
   if (result) {
-    const live = formatLiveTerminalOutput(result, 12, OUTPUT_PREVIEW_MAX);
-    out += "\n**Output:**\n" + fence(live) + "\n";
+    const live = truncateMiddleLines(result, OUTPUT_PREVIEW_LINES, OUTPUT_PREVIEW_MAX);
+    out += "\n**Output:**\n" + foldableBlock("\u{1F4BB} output: ", live) + "\n";
   }
   return out;
 }
@@ -261,7 +279,13 @@ function formatWrite(u: SessionUpdate, kind: string, raw: Record<string, unknown
   let out = "\u{1F4DD} " + boldVerbPath(verb, path) + tail;
   const content = extractContent(raw) || extractToolOutput(u);
   if (content) {
-    out += "\n" + fence(truncateMiddleLines(content, OUTPUT_PREVIEW_LINES, CONTENT_PREVIEW_MAX), detectLang(path)) + "\n";
+    out +=
+      "\n" +
+      foldableBlock(
+        "\u{1F4D6} file: ",
+        truncateMiddleLines(content, OUTPUT_PREVIEW_LINES, CONTENT_PREVIEW_MAX),
+      ) +
+      "\n";
   }
   return out;
 }
@@ -290,7 +314,13 @@ function formatRead(
   }
   const body = extractToolOutput(u);
   if (body) {
-    out += "\n" + fence(truncateMiddleLines(body, OUTPUT_PREVIEW_LINES, OUTPUT_PREVIEW_MAX), detectLang(path)) + "\n";
+    out +=
+      "\n" +
+      foldableBlock(
+        "\u{1F4D6} file: ",
+        truncateMiddleLines(body, OUTPUT_PREVIEW_LINES, OUTPUT_PREVIEW_MAX),
+      ) +
+      "\n";
   }
   return out;
 }
@@ -314,7 +344,13 @@ function formatList(
   if (filters.exclude) out += "\n  exclude: `" + filters.exclude.replace(/`/g, "'") + "`";
   const body = extractToolOutput(u);
   if (body) {
-    out += "\n" + fence(truncateMiddleLines(body, OUTPUT_PREVIEW_LINES, OUTPUT_PREVIEW_MAX)) + "\n";
+    out +=
+      "\n" +
+      foldableBlock(
+        "\u{1F4BB} output: ",
+        truncateMiddleLines(body, OUTPUT_PREVIEW_LINES, OUTPUT_PREVIEW_MAX),
+      ) +
+      "\n";
   }
   return out;
 }
@@ -346,7 +382,13 @@ function formatSearch(
   if (raw.type) out += "\n  type: " + String(raw.type);
   const hits = extractToolOutput(u);
   if (hits) {
-    out += "\n" + fence(truncateMiddleLines(hits, OUTPUT_PREVIEW_LINES, OUTPUT_PREVIEW_MAX)) + "\n";
+    out +=
+      "\n" +
+      foldableBlock(
+        "\u{1F4BB} output: ",
+        truncateMiddleLines(hits, OUTPUT_PREVIEW_LINES, OUTPUT_PREVIEW_MAX),
+      ) +
+      "\n";
   }
   return out;
 }
@@ -391,7 +433,13 @@ function formatFetch(u: SessionUpdate, raw: Record<string, unknown>, tail: strin
   if (body) out += "\n  body: " + truncate(body, 200);
   const result = extractToolOutput(u);
   if (result) {
-    out += "\n" + fence(truncateMiddleLines(result, OUTPUT_PREVIEW_LINES, OUTPUT_PREVIEW_MAX)) + "\n";
+    out +=
+      "\n" +
+      foldableBlock(
+        "\u{1F4BB} output: ",
+        truncateMiddleLines(result, OUTPUT_PREVIEW_LINES, OUTPUT_PREVIEW_MAX),
+      ) +
+      "\n";
   }
   return out;
 }
@@ -404,7 +452,13 @@ function formatWebSearch(u: SessionUpdate, raw: Record<string, unknown>, tail: s
   if (count) out += "\n  results: " + count;
   const result = extractToolOutput(u);
   if (result) {
-    out += "\n" + fence(truncateMiddleLines(result, OUTPUT_PREVIEW_LINES, OUTPUT_PREVIEW_MAX)) + "\n";
+    out +=
+      "\n" +
+      foldableBlock(
+        "\u{1F4BB} output: ",
+        truncateMiddleLines(result, OUTPUT_PREVIEW_LINES, OUTPUT_PREVIEW_MAX),
+      ) +
+      "\n";
   }
   return out;
 }
@@ -519,15 +573,22 @@ function formatGeneric(
   let out = icon + " **" + label + "**" + tail;
   if (toolName && toolName !== label) out += `\n  tool: \`${toolName}\``;
   if (path) out += "\n  \u{1F4C4} " + pathCode(truncate(path, 120));
-  if (cmd) out += "\n" + fence(truncateMiddle(cmd, PREVIEW_MAX), "bash") + "\n";
-  else if (query) out += "\n  query: " + pathCode(truncate(query, 150), "query");
+  if (cmd) {
+    out += "\n" + foldableBlock("\u{1F4BB} command: ", truncateMiddle(cmd, PREVIEW_MAX)) + "\n";
+  } else if (query) out += "\n  query: " + pathCode(truncate(query, 150), "query");
   else if (!path && !cmd) {
     const args = formatArgLines(raw);
     if (args) out += "\n" + fence(truncateMiddle(args, PREVIEW_MAX)) + "\n";
   }
   const result = extractToolOutput(u);
   if (result) {
-    out += "\n" + fence(truncateMiddleLines(result, OUTPUT_PREVIEW_LINES, OUTPUT_PREVIEW_MAX)) + "\n";
+    out +=
+      "\n" +
+      foldableBlock(
+        "\u{1F4BB} output: ",
+        truncateMiddleLines(result, OUTPUT_PREVIEW_LINES, OUTPUT_PREVIEW_MAX),
+      ) +
+      "\n";
   }
   return out;
 }

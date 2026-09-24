@@ -148,7 +148,7 @@ async function rerender(ctx: Context, deps: BotDeps, note?: string): Promise<voi
 }
 
 function busyReason(deps: BotDeps): string | undefined {
-  if (deps.acp.hasInflightPrompt()) return "\u23F3 Grok is running a turn — try again when idle (or /cancel first).";
+  if (deps.pool.liveClients().some((c) => c.hasInflightPrompt())) return "\u23F3 Grok is running a turn — try again when idle (or /cancel first).";
   return undefined;
 }
 
@@ -174,7 +174,6 @@ export function registerAccounts(bot: Bot, deps: BotDeps): void {
     const text = ctx.message.text;
     if (text.startsWith("/")) return next();
     pending.delete(chatId);
-    await ctx.deleteMessage().catch(() => {});
     const name = text.trim().slice(0, 60);
     let note: string;
     try {
@@ -254,10 +253,10 @@ export function registerAccounts(bot: Bot, deps: BotDeps): void {
     if (!res.ok) return void rerender(ctx, deps, `\u274C ${res.error ?? "Import failed."}`);
     // Import reuses the live auth.json — just re-bind the agent headlessly.
     try {
-      await deps.acp.stopAndWait();
-      await deps.acp.start(true);
+      await deps.pool.stopAllAndWait();
+      await deps.pool.start(true);
     } catch (e) {
-      await deps.acp.start(true).catch(() => {});
+      await deps.pool.start(true).catch(() => {});
       return void rerender(ctx, deps, `\u26A0\uFE0F Imported, but re-bind failed: ${(e as Error).message}`);
     }
     let note = `\u2705 Imported the current login${res.label ? ` (${res.label})` : ""}.`;
@@ -284,14 +283,14 @@ export function registerAccounts(bot: Bot, deps: BotDeps): void {
         .catch(() => {});
       // 2) Stop agent BEFORE writing auth.json (avoids the live process
       //    overwriting / racing the file, and never opens a browser).
-      await deps.acp.stopAndWait();
+      await deps.pool.stopAllAndWait();
       let meta;
       try {
         meta = await deps.accounts.switchTo(id);
         // 3) Start agent; it authenticates headlessly with cached_token.
-        await deps.acp.start(true);
+        await deps.pool.start(true);
       } catch (e) {
-        await deps.acp.start(true).catch(() => {});
+        await deps.pool.start(true).catch(() => {});
         throw e;
       }
       // Remember preferred account for this chat/topic scope (model/reasoning peers).

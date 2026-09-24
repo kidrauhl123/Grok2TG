@@ -10,6 +10,34 @@ import { toTelegramMarkdown } from "../render/markdown.js";
 const log = createLogger("tg:io");
 const MAX_RETRIES = 3;
 
+/**
+ * How many of a chat's next real replies carry `remove_keyboard`. A reply
+ * keyboard stays on the client until a message that remains in the chat tells
+ * Telegram to drop it; a message sent and deleted at once does not. A few
+ * repeats cover sessions that were already open when the bar was removed.
+ */
+const KEYBOARD_CLEAR_REPLIES = 3;
+const keyboardClearsLeft = new Map<string, number>();
+
+/** Attach `remove_keyboard` to the next few replies in one chat or topic. */
+export function clearReplyKeyboard(chatId: number, threadId?: number): void {
+  keyboardClearsLeft.set(`${chatId}:${threadId ?? 0}`, KEYBOARD_CLEAR_REPLIES);
+}
+
+/** `remove_keyboard` for this reply, or nothing once the chat has had its few. */
+export function takeKeyboardClear(
+  chatId: number,
+  extra: Record<string, unknown>,
+): { remove_keyboard: true } | undefined {
+  const threadId = extra.message_thread_id;
+  const key = `${chatId}:${typeof threadId === "number" ? threadId : 0}`;
+  const left = keyboardClearsLeft.get(key);
+  if (!left) return undefined;
+  if (left === 1) keyboardClearsLeft.delete(key);
+  else keyboardClearsLeft.set(key, left - 1);
+  return { remove_keyboard: true };
+}
+
 const TRANSIENT_NET =
   /econnreset|econnrefused|etimedout|eai_again|socket hang ?up|fetch failed|network|temporarily unavailable/i;
 
@@ -76,17 +104,24 @@ export async function safeSend(
   plain: string,
   extra: Record<string, unknown> = {},
 ): Promise<number | undefined> {
-  try {
-    const msg = await withRetry(() =>
-      api.sendMessage(chatId, markdownV2, { parse_mode: "MarkdownV2", ...extra }),
+  const markup = takeKeyboardClear(chatId, extra);
+  const send = (text: string, parse?: "MarkdownV2"): Promise<{ message_id: number }> =>
+    withRetry(() =>
+      api.sendMessage(chatId, text, {
+        ...(parse ? { parse_mode: parse } : {}),
+        ...extra,
+        ...(markup ? { reply_markup: markup } : {}),
+      }),
     );
+  try {
+    const msg = await send(markdownV2, "MarkdownV2");
     return msg.message_id;
   } catch (err) {
     if (isParseError(err)) {
       // Do not send raw markdown — Telegram clients soft-render ** and ``` in
       // plain messages and Windows paths look broken (e.g. **Edit C:** wrap).
       const demoted = demoteMarkdownForPlain(plain);
-      const msg = await withRetry(() => api.sendMessage(chatId, demoted, extra));
+      const msg = await send(demoted);
       return msg.message_id;
     }
     log.warn("sendMessage failed:", (err as Error).message);

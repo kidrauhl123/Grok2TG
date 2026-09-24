@@ -7,10 +7,7 @@ import type { ContentBlock } from "../grok/types.js";
 import type { PromptInput } from "../app/types.js";
 
 export interface ContentOptions {
-  reasoning?: string;
   priming?: string;
-  /** Appended so the agent emits a `{progress: N%}` marker. */
-  progress?: string;
   /** Appended so the agent keeps generated images in the session media folder. */
   imageOutput?: string;
 }
@@ -53,15 +50,8 @@ export function buildContentBlocks(input: PromptInput, opts: ContentOptions = {}
   if (opts.priming) {
     text = `${opts.priming}\n\n---\n\nUser's new message:\n${text}`;
   }
-  if (opts.reasoning) {
-    text = `(${opts.reasoning})\n\n${text}`;
-  }
   if (opts.imageOutput) {
     text = `${text}\n\n${opts.imageOutput}`;
-  }
-  if (opts.progress) {
-    // Progress last so its "marker is the final line" rule stays true.
-    text = `${text}\n\n${opts.progress}`;
   }
 
   blocks.push({ type: "text", text });

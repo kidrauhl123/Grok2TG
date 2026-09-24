@@ -22,6 +22,7 @@ import {
   type ReportBackMeta,
 } from "./manager-jobs.js";
 import type { TelegramBotService } from "./telegram-bots.js";
+import { takeKeyboardClear } from "./telegram-io.js";
 import type { TelegramAction } from "../render/telegram-bridge.js";
 
 const log = createLogger("telegram-actions");
@@ -233,6 +234,10 @@ async function notifyUser(
         allow_sending_without_reply: true,
       };
     }
+    // Same pending clear as safeSend. General replies go through notify, which
+    // used to skip it, so a stale bar armed by the user's text never dropped.
+    const markup = takeKeyboardClear(ctx.chatId, extra);
+    if (markup) extra.reply_markup = markup;
     const msg = await ctx.api.sendMessage(ctx.chatId, text, extra);
     return {
       action: "notify",

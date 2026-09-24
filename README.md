@@ -38,13 +38,12 @@ re-architected for the Grok Build CLI and extended into a full multi-session cli
 | 🟢 **Connect to live sessions** | `/active` shows sessions running **right now** on your PC. Watch them live, or continue them — see below. |
 | 🛑 **Kill a session / PID** | Each live `/sessions` · `/active` card has a **🛑 Kill · pid N** button (confirm-guarded) that stops that session's process and its child tree; `/killall` stops them all. The bot's own agent is never killable. **Stop** only cancels the current session turn — never the shared agent. |
 | 📡 **Live watch** | Follow a running session read-only in real time (tails its event log). |
-| 🧭 **Always-visible menu** | A persistent keyboard plus a pinned status panel that appears while a task runs (and clears when idle), showing your current **project, agent, reasoning effort, model, session and queue**. |
+| 🧭 **Menu** | `/menu` opens the inline menu. A pinned status panel appears while a task runs (and clears when idle), showing your current **project, agent, reasoning effort, model, session and queue**. |
 | ⏰ **Scheduled tasks** | Create prompts that run on a schedule (once / daily / weekly / monthly / every-N-minutes) in a chosen project, delivered back to your chat. |
 | 🖼 **Multi-image prompts** | Send one or many photos (albums included) with a caption — all attached to the prompt for the agent to analyze. |
 | 📜 **History** | `/history` shows the latest messages of any session. |
 | 🧩 **MCP control** | `/mcp` lists MCP servers, **health-checks** them (which connected / failed and why), and **enables/disables** them — then restarts the agent to apply. |
 | 👥 **Subagent visibility** | When Grok delegates to subagents and waits on them, you see each one **start / work / finish** plus a live `🤖 N running` summary — and subagent permission prompts route to your chat. |
-| 📈 **Task progress bar** | The agent appends a `{progress: N%}` marker; the bot hides it and shows a **green 0–100% loading bar** on the live message, in the status panel, and on session cards (`SHOW_PROGRESS`). |
 | 🔐 **Sign in from chat** | `/reauth` signs you in without a terminal — **🔑 Sign in** runs headless `grok login --device-auth` (link/code streams to your chat, no host browser), or **📥 Import** an existing on-host login; the agent restarts under the new identity. |
 | 👥 **Multiple accounts** | `/accounts` saves several Grok **sign-ins** (custom names) and switches between them in a tap — **stops the agent → replaces `~/.grok/auth.json` → restarts headlessly** (never opens a browser). |
 | 🔁 **Auto-rotate on give-up** | When a turn exhausts its retries (or hits **402 balance exhausted** with no same-account retry), optionally cycle through your other saved accounts once: stop CLI → swap `auth.json` → restart + re-auth → retry. First that works wins (toggle in `/accounts`). |
@@ -72,7 +71,6 @@ re-architected for the Grok Build CLI and extended into a full multi-session cli
 | Resume saved sessions | ✅ | ❌ |
 | Attach to **live** PC sessions (watch / fork) | ✅ | ❌ |
 | **Kill a session by PID** (or all at once) | ✅ | ❌ |
-| **Live task-progress bars** (`{progress: N%}`) | ✅ | ❌ |
 | **Sign in from chat** (`/reauth`, device-code) | ✅ | ❌ |
 | **Multiple saved accounts** + headless one-tap switch (`/accounts`) | ✅ | ❌ |
 | **Auto-rotate accounts** when a turn gives up | ✅ | ❌ |
@@ -277,14 +275,11 @@ control, troubleshooting):
 
 ## 🧭 The menu & status panel
 
-A tiny **persistent bar** sits under the message box — **☰ Menu · 🆕 New session
-· 🧭 Running · ⏹ Stop** (while idle/busy the middle button may show Running
-instead of New) — so common actions are one tap away without clutter. Tap
-**☰ Menu** (or `/menu`) to open a clean, grouped **inline menu**: Project ·
-Running · Sessions · Agent · Model · Reasoning · Tasks · Status · Usage · Stop ·
-Kill all. Forum topics keep **New** on the topic inline menu (reply keyboards are
-unreliable there). The bar can be hidden (🙈) and restored (⌨️ Show bar or
-`/menu`).
+There is no button bar under the message box, and New, Running and Stop are not
+buttons either. Use the commands: `/menu`, `/new`, `/running`, `/stop`,
+`/cancel`. `/menu` opens the inline menu for settings only (Project, Sessions,
+Model, Reasoning, Tasks, Status, Usage, Kill all). A bar left over from an older
+version is removed the next time you send a message.
 
 While a task is running, a **pinned status panel** appears at the top of the chat
 showing your current **task progress, activity, queue, project, session, context
@@ -353,25 +348,6 @@ along with your new message, so a terse "fix this" or "why?" keeps its meaning.
 If you highlight a specific **quote** while replying, the bot forwards that exact
 excerpt plus the surrounding message. Works for text, photo, voice and file
 prompts alike (long quotes are trimmed to keep prompts lean).
-
-## 📈 Task progress
-
-The bot asks the agent to end each message with a `{progress: N%}` marker, then
-**hides the marker** and renders a **green loading bar** from 0–100 %
-(`🟩🟩🟩🟩🟩⬜⬜⬜⬜⬜ 50%`, all-green ✅ at 100 %) so you can see how far along the
-current task is. The bar appears at the bottom of the **live message**, in the
-pinned **status panel**, and on **`/running` and `/sessions` cards**. Markers are
-also stripped from history, replays and previews, so the raw plumbing never
-shows. Turn it off with `SHOW_PROGRESS=false`.
-
-That marker is only an instruction the model can ignore — weaker/free models and
-long, tool-heavy turns often emit none, which used to leave the bar empty for the
-whole turn. So when `SHOW_PROGRESS` is on but no marker arrives, the bot falls
-back to a **computed** bar derived from real activity (completed tool calls,
-streamed output, elapsed time): it starts low, climbs as work advances, and fills
-to 100 % when the turn completes. The agent's own marker, when present, always
-takes precedence and the value never decreases. Disable the fallback with
-`PROGRESS_FALLBACK=false`.
 
 ## 🔐 Signing in to Grok
 
@@ -461,8 +437,6 @@ Resuming an **idle** session loads it directly so you continue the exact thread.
 | `DIFF_MAX_LINES` | no | `120` | Max diff lines shown inline. |
 | `DOC_MAX_CHARS` | no | `100000` | Max characters of a **text file** attachment inlined into the prompt (a long message Telegram turned into a `.txt`, plus code, logs, JSON, CSV, …). Longer files are truncated with a note; binaries are saved under `<data>/downloads` and their path is handed to the agent. `0` = unlimited. |
 | `SHOW_SUBAGENTS` | no | `true` | Stream subagent (crew) start/work/finish while the main agent waits. |
-| `SHOW_PROGRESS` | no | `true` | Ask the agent to append a `{progress: N%}` marker to each message; the bot parses it, hides the marker, and renders a green 0–100% bar on the live message, in session cards, and in the status panel. |
-| `PROGRESS_FALLBACK` | no | `true` | When `SHOW_PROGRESS` is on but the agent emits **no** `{progress: N%}` marker (weaker/free models and long tool-heavy turns often skip it), render a **bot-computed** bar derived from real activity (completed tool calls, streamed output, elapsed time) so a live bar still advances — filling to 100% when the turn completes. The agent's own marker, when present, always takes precedence and stays monotonic. |
 | `NOTIFY_OTHER_SESSIONS` | no | `true` | Deliver a session's "Done" summary (with a short created/edited/deleted count) even when it's a background session, marked "From other session". `false` keeps background sessions silent. |
 | `SUGGESTIONS_ENABLED` | no | `true` | After Done, quietly ask for 1–3 scored follow-ups shown as buttons. |
 | `SUGGESTIONS_AUTO_APPROVE_PCT` | no | `95` | Auto-queue suggestions with need ≥ this % as one multi-step prompt (`0` = buttons only). |

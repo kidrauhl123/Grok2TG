@@ -25,7 +25,11 @@ export class SettingsStore {
   /** Settings by storage key (`chatId` or `chatId:t{threadId}`). */
   getKey(key: string): ChatSettings {
     const existing = this.store.get()[key];
-    return existing ?? defaultSettings();
+    if (!existing) return defaultSettings();
+    // `max` was a prompt-hint tier the model never accepted. grok-4.7's top
+    // advertised effort is `xhigh`, so a saved `max` becomes that.
+    if ((existing.reasoning as string) === "max") return { ...existing, reasoning: "xhigh" };
+    return existing;
   }
 
   update(chatId: number, patch: Partial<ChatSettings>): ChatSettings {

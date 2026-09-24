@@ -61,11 +61,14 @@ export function registerForum(bot: Bot, deps: BotDeps, forum: ForumManager): voi
       return;
     }
 
+    // Ad-hoc topics (闲聊, scratch, etc.) share the workspace so several
+    // unbound chats can run without each one naming a directory.
+    const chat = forum.store.bindProject(threadId, deps.cfg.workspace, created.name, "ai_chat");
+    log.info(`topic "${created.name}" (#${threadId}) default-bound to workspace ${chat.projectPath}`);
     await ctx
       .reply(
-        `\u{1F4CC} New topic **${created.name}**.\n\n` +
-          `No exact catalog project matched this name.\n` +
-          BIND_HINT,
+        `\u{1F4CC} Topic **${created.name}** is on the workspace:\n\`${chat.projectPath}\`\n\n` +
+          `You can chat here now. To move it onto a project later, send an absolute path or an exact catalog name.`,
         { parse_mode: "Markdown", message_thread_id: threadId },
       )
       .catch(() => {});
@@ -160,8 +163,9 @@ export async function resolveForumRuntime(
     binding = forum.noteUserTopic(tid, `Topic ${tid}`);
   }
 
-  // Unbound only: try to interpret text as path / exact catalog name (do not
-  // steal normal prompts when already bound — even if pending flag is stale).
+  // Unbound (created before workspace default, or bind never finished):
+  // a real path / exact catalog name still binds; anything else is a chat
+  // on the shared workspace so multiple 闲聊 topics do not each need a folder.
   if (!binding.projectPath) {
     const result = forum.tryBindPath(tid, text);
     if (result.ok) {
@@ -184,17 +188,14 @@ export async function resolveForumRuntime(
       }
       return "handled";
     }
-    await deps.api
-      .sendMessage(
-        chatId,
-        `\u2753 ${result.error}\n\n${BIND_HINT.replace(/\*\*/g, "")}`,
-        {
-          ...outboundThreadExtra(tid),
-          reply_parameters: { message_id: messageId },
-        },
-      )
-      .catch(() => {});
-    return "handled";
+    const chat = forum.store.bindProject(
+      tid,
+      deps.cfg.workspace,
+      binding.name || `Topic ${tid}`,
+      "ai_chat",
+    );
+    log.info(`topic #${tid} default-bound to workspace ${chat.projectPath} (text was not a path)`);
+    binding = chat;
   }
 
   const resolved = forum.resolveCwd(tid);

@@ -4,7 +4,7 @@
  */
 import { closeSync, openSync, readSync, statSync } from "node:fs";
 import { IMAGE_OUTPUT_DIRECTIVE } from "../render/image-output.js";
-import { extractProgress, PROGRESS_DIRECTIVE } from "../render/progress.js";
+import { stripProgressMarkers } from "../render/progress.js";
 import {
   extractTelegramActions,
   TELEGRAM_BRIDGE_MARKER,
@@ -102,7 +102,7 @@ export function readLastUserPrompt(jsonlPath: string, maxEntries = 40, maxLen = 
 }
 
 function cleanCardProse(raw: string, max = 250): string {
-  let t = extractProgress(raw).cleaned;
+  let t = stripProgressMarkers(raw);
   t = t.replace(/```[\s\S]*?```/g, " ");
   t = t.replace(/^COMPLEXITY \(decide yourself[\s\S]*?User task:\s*/i, "");
   t = t.replace(/^TASK COMPLEXITY:[\s\S]*?User task:\s*/i, "");
@@ -232,9 +232,8 @@ function toEntry(ev: RawEvent): HistoryEntry | undefined {
  *  / fork-priming never surface the raw plumbing. */
 function cleanStoredText(text: string): string {
   if (!text) return text;
-  let t = extractProgress(text).cleaned;
+  let t = stripProgressMarkers(text);
   t = extractTelegramActions(t).cleaned;
-  if (t.includes(PROGRESS_DIRECTIVE)) t = t.split(PROGRESS_DIRECTIVE).join("").trim();
   if (t.includes(IMAGE_OUTPUT_DIRECTIVE)) t = t.split(IMAGE_OUTPUT_DIRECTIVE).join("").trim();
   // Prefer "User task (continued):" BEFORE plain "User task:" — the continued
   // marker contains the substring "User task:", so lastIndexOf("User task:")

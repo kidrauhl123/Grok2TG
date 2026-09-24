@@ -9,8 +9,8 @@ import type { SessionMeta } from "../../sessions/types.js";
 import type { BotDeps } from "../deps.js";
 
 function targets(deps: BotDeps): SessionMeta[] {
-  const self = deps.acp.pid;
-  return deps.store.listActive().filter((s) => s.lockPid && s.lockPid !== self);
+  const mine = new Set(deps.pool.pids());
+  return deps.store.listActive().filter((s) => s.lockPid && !mine.has(s.lockPid));
 }
 
 export async function showKillConfirm(ctx: Context, deps: BotDeps): Promise<void> {

@@ -3,7 +3,7 @@
  * prompt input model (text plus optional images) used across the bot.
  */
 
-export const REASONING_LEVELS = ["minimal", "low", "medium", "high", "max"] as const;
+export const REASONING_LEVELS = ["minimal", "low", "medium", "high", "xhigh"] as const;
 export type ReasoningEffort = (typeof REASONING_LEVELS)[number];
 
 export interface ChatSettings {

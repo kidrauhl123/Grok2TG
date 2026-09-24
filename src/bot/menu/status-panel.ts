@@ -6,7 +6,6 @@
 import { type Api, GrammyError } from "grammy";
 import { basename } from "node:path";
 import { reasoningLabel } from "../../app/reasoning.js";
-import { progressBar } from "../../render/progress.js";
 import type { SettingsStore } from "../../app/settings-store.js";
 import { createLogger } from "../../logger.js";
 import type { RuntimeRegistry } from "../registry.js";
@@ -44,7 +43,6 @@ export class StatusPanel {
     const ctxPct = meta?.contextUsagePercentage;
     const running = this.registry.controller(chatId).count();
     const subagents = this.registry.subagentSummaryForChat(chatId);
-    const progress = rt.taskProgress;
 
     const SEP = " | "; // pipe delimiter between inline fields
     const lines: string[] = [];
@@ -54,10 +52,7 @@ export class StatusPanel {
     const plan = rt.planBoard;
     if (plan) lines.push(plan);
 
-    // 2) Progress — only while a turn is live (cleared when it ends).
-    if (progress !== undefined) lines.push(`\u{1F4C8} ${progressBar(progress)}`);
-
-    // 3) Activity: state + only the counters that currently apply.
+    // 2) Activity: state + only the counters that currently apply.
     const activity: string[] = [rt.isBusy ? "\u23F3 Working" : "\u2705 Idle"];
     if (rt.queueLength > 0) activity.push(`\u{1F4E5} ${rt.queueLength} queued`);
     if (running > 1) activity.push(`\u{1F9ED} ${running} sessions`);
