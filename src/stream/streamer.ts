@@ -4,8 +4,8 @@
  *
  * The turn is modelled as ordered segments so the transcript reads clearly:
  *   • plain prose      = the agent talking to you
- *   • > 💭 quoted block = the agent's thinking
- *   • 🔧 + code block   = tool calls / terminal commands / diffs
+ *   • 🧠 body text      = the agent's thinking, in full, not a quote
+ *   • one Hermes "all" line per tool start, stacked in one bubble
  *
  * A single "live" message is edited as content grows; only when it would exceed
  * Telegram's size limit is it sealed and a new live message started.
@@ -15,13 +15,10 @@ import { chunkMarkdown } from "../render/chunk.js";
 import { toTelegramMarkdown } from "../render/markdown.js";
 import { stripProgressMarkers } from "../render/progress.js";
 import { stripTelegramActionFences } from "../render/telegram-bridge.js";
-import { truncateMiddle } from "../render/truncate.js";
-import { safeEdit, safeSend, sendRichMarkdown } from "../bot/telegram-io.js";
+import { safeEdit, safeSend } from "../bot/telegram-io.js";
 import { outboundThreadExtra } from "../forum/thread.js";
 
 const SOFT_LIMIT = 3500;
-/** Display budget for a thinking block (middle-truncated; session context keeps all). */
-const THINK_DISPLAY_MAX = 2800;
 /** Do not refresh the activity line until the live bubble has been silent this long. */
 export const LIVENESS_MIN_SILENCE_MS = 12_000;
 
@@ -94,6 +91,16 @@ export class ResponseStreamer {
   private livenessLine: string | undefined;
   /** Single-flight lock so concurrent ensureLiveSurface calls cannot double-post. */
   private ensureSurfaceInflight: Promise<void> | undefined;
+  /**
+   * Answer text held until the turn finishes. It is not edited into Telegram
+   * while the model is still writing — that seals a half message.
+   * Presence counts as output so a dropped stream is not re-run from scratch.
+   */
+  private answerBuf = "";
+  /** True once a thought or tool card was written into the live bubble. */
+  private processPainted = false;
+  /** In-flight flush, so a final flush can wait instead of dropping the tail. */
+  private flushDone: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly api: Api,
@@ -121,20 +128,22 @@ export class ResponseStreamer {
   }
 
   /**
-   * Post a placeholder live message immediately so typing+pulse have a surface
-   * before the first ACP chunk (critical while subagents work silently).
-   * Replaced in place when real content arrives. Concurrent callers share one
-   * in-flight send — rapid setLiveStep must not create duplicate Working bubbles.
+   * Post a placeholder live message so a real step (a tool, a subagent) has a
+   * surface before the first chunk. A bare "Working…" is not a step: that used
+   * to be its own bubble, and it is replaced by a reaction on the user's
+   * message, so it must not be posted here.
+   * Concurrent callers share one in-flight send.
    */
-  async ensureLiveSurface(placeholder = "\u23F3 Working\u2026"): Promise<void> {
+  async ensureLiveSurface(placeholder?: string): Promise<void> {
     if (this.closed || this.liveId !== undefined) return;
+    const src = (placeholder ?? "").trim();
+    if (!src || src === "\u23F3 Working\u2026") return;
     if (this.ensureSurfaceInflight) return this.ensureSurfaceInflight;
     this.ensureSurfaceInflight = (async () => {
       try {
         if (this.closed || this.liveId !== undefined) return;
-        const src = placeholder.trim() || "\u23F3 Working\u2026";
         const rendered = toTelegramMarkdown(src);
-        this.liveId = await safeSend(this.api, this.chatId, rendered, src, this.replyExtra(false));
+        this.liveId = await safeSend(this.api, this.chatId, rendered, src, this.replyExtra(true));
       } finally {
         this.ensureSurfaceInflight = undefined;
       }
@@ -170,9 +179,8 @@ export class ResponseStreamer {
   }
 
   /** reply_parameters threading a message to the user's prompt, plus the forum
-   *  topic id. Only the final answer quotes the prompt; thoughts, tool cards and
-   *  the live "working" bubble are sent on their own so the quote marks the
-   *  answer and nothing else. */
+   *  topic id. The process bubble (thinking, tools) and the finished answer
+   *  both quote the prompt, so the work stays on the question. */
   private replyExtra(reply: boolean): Record<string, unknown> {
     const extra: Record<string, unknown> = { ...this.threadExtra() };
     if (reply && this.replyTo !== undefined) {
@@ -183,20 +191,41 @@ export class ResponseStreamer {
 
   appendOutput(text: string): void {
     if (!text) return;
-    this.merge("out", text);
+    // Record only. The finished answer is sent by the runtime after the turn,
+    // from the full transcript, so a mid-turn edit cannot close a half reply.
+    this.answerBuf += text;
     this.noteRealContent();
-    // The answer is sent once, when the turn finishes. Editing one bubble as the
-    // text grows leaves it stuck on a half-written edit, so prose is not flushed
-    // live. Thoughts and tool cards still stream.
-    if (!this.segs.slice(this.sealedIdx).some((s) => s.kind !== "out")) return;
-    this.schedule();
   }
 
   appendThought(text: string): void {
     if (!text || this.proseOnly) return;
     this.merge("think", text);
     this.noteRealContent();
-    this.schedule();
+    this.schedule(true);
+  }
+
+  /**
+   * Hermes `all` + `accumulate`: append one tool-start line. The same line
+   * twice in a row becomes `line (×N)`. Lines stack with a single newline.
+   */
+  appendProgressLine(rawMarkdown: string): void {
+    const line = rawMarkdown.replace(/\s+$/g, "");
+    if (!line.trim() || this.proseOnly) return;
+    const last = this.segs.at(-1);
+    if (last?.kind === "tool" && last.toolId === "progress") {
+      const base = last.text.replace(/ \(×\d+\)$/, "");
+      if (base === line) {
+        const times = / \(×(\d+)\)$/.exec(last.text);
+        const n = times ? Number(times[1]) + 1 : 2;
+        last.text = `${line} (×${n})`;
+      } else {
+        this.segs.push({ kind: "tool", text: line, toolId: "progress" });
+      }
+    } else {
+      this.segs.push({ kind: "tool", text: line, toolId: "progress" });
+    }
+    this.noteRealContent();
+    this.schedule(true);
   }
 
   /**
@@ -276,7 +305,7 @@ export class ResponseStreamer {
 
   /** True when agent prose/tools/thoughts were appended (not just a seed bubble). */
   get hasOutput(): boolean {
-    return this.segs.some((s) => s.text.trim().length > 0);
+    return this.answerBuf.trim().length > 0 || this.segs.some((s) => s.text.trim().length > 0);
   }
 
   async finalize(): Promise<void> {
@@ -284,7 +313,13 @@ export class ResponseStreamer {
     this.livenessLine = undefined;
     if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
+    if (this.flushing) await this.flushDone;
     await this.flush(true);
+    if (this.liveId !== undefined && !this.processPainted) {
+      const id = this.liveId;
+      this.liveId = undefined;
+      await this.api.deleteMessage(this.chatId, id).catch(() => {});
+    }
     // Seeded Thinking… with zero agent text: clear the placeholder.
     // Manager quiet mode also deletes/replaces this bubble explicitly.
     if (
@@ -336,33 +371,32 @@ export class ResponseStreamer {
 
   private async flush(final: boolean): Promise<void> {
     if (this.flushing) {
-      if (!final) this.schedule();
-      return;
+      if (!final) {
+        this.schedule();
+        return;
+      }
+      await this.flushDone;
     }
     if (!this.dirty && !final) return;
+    let release: () => void = () => {};
+    this.flushDone = new Promise((resolve) => {
+      release = resolve;
+    });
     this.flushing = true;
     this.dirty = false;
     try {
       await this.sealOverflow(final);
-      const liveSegs = this.segs.slice(this.sealedIdx);
+      // The answer is not in these segments. It is sent once, after the turn.
+      const liveSegs = this.segs.slice(this.sealedIdx).filter((s) => s.kind !== "out");
       const base = this.captureProgress(renderSegs(liveSegs));
-      // The live bubble quotes the user only while it holds the answer. A thought
-      // or tool card is sealed off before the answer arrives, so this is the answer
-      // exactly when the remaining segments are prose.
-      const liveReply = liveSegs.some((s) => s.kind === "out");
+      // Hang the process bubble on the user's message. The finished answer is a
+      // second reply, sent only after the text is complete.
+      const liveReply = this.replyTo !== undefined;
       // Never send an empty / progress-only bubble. Plan alone is allowed so the
       // board is visible as soon as the agent publishes steps.
       if (!base.trim() && !this.planMarkdown && !this.livenessLine) return;
-      // The answer, on its own, goes out as a rich message with the model's raw
-      // Markdown. Only when nothing else shares the bubble: a plan board or a
-      // liveness line is rendered text, and a rich message cannot be edited.
-      if (final && base.trim() && liveSegs.every((s) => s.kind === "out") && !this.planMarkdown && !this.livenessLine) {
-        await sendRichMarkdown(this.api, this.chatId, `${base}${this.richFooter()}`, this.replyExtra(true));
-        this.liveId = undefined;
-        this.sealedIdx = this.segs.length;
-        return;
-      }
-      // Live bubble: body → plan → liveness (silent tools) → footer.
+      if (base.trim() || this.planMarkdown) this.processPainted = true;
+      // Live bubble: thoughts / tools → plan → liveness → footer.
       const parts: string[] = [];
       if (base.trim()) parts.push(base);
       if (!this.proseOnly && this.planMarkdown) parts.push(this.planMarkdown);
@@ -389,6 +423,7 @@ export class ResponseStreamer {
       }
     } finally {
       this.flushing = false;
+      release();
     }
   }
 
@@ -433,18 +468,12 @@ export class ResponseStreamer {
 
   private async seal(from: number, to: number): Promise<void> {
     const slice = this.segs.slice(from, to);
-    const base = this.captureProgress(renderSegs(slice));
+    const base = this.captureProgress(renderSegs(slice.filter((s) => s.kind !== "out")));
     if (!base.trim()) return;
-    // The answer goes out as a rich message: the model's raw Markdown, so
-    // headings, tables and task lists render as written. Thoughts and tool
-    // cards stay on the MarkdownV2 path below.
-    if (slice.every((s) => s.kind === "out")) {
-      await sendRichMarkdown(this.api, this.chatId, `${base}${this.richFooter()}`, this.replyExtra(true));
-      return;
-    }
-    // A sealed bubble is finished, so it carries the footer (hashtags). It quotes
-    // the user only when it is the answer; a sealed thought or tool card does not.
-    const reply = slice.some((s) => s.kind === "out");
+    this.processPainted = true;
+    // A sealed process bubble stays, and it quotes the user so the thinking
+    // and tool cards sit on the same message as the question.
+    const reply = this.replyTo !== undefined && slice.some((s) => s.kind !== "out");
     const src = `${base}${this.footerSuffix()}`;
     const chunks = chunkMarkdown(toTelegramMarkdown(src));
     const plain = chunkMarkdown(src);
@@ -494,50 +523,33 @@ export function groupForReply(segs: Seg[]): RenderGroup[] {
 }
 
 function renderSegs(segs: Seg[]): string {
-  return segs
-    .map((s) => {
-      if (s.kind === "out") return s.text.trim();
-      if (s.kind === "think") return quoteThought(s.text);
-      return s.text.trim();
-    })
-    .filter((x) => x.length > 0)
-    .join("\n\n");
+  const parts: { text: string; progress: boolean }[] = [];
+  for (const s of segs) {
+    const text = s.kind === "out"
+      ? s.text.trim()
+      : s.kind === "think"
+        ? formatThought(s.text)
+        : s.text.trim();
+    if (!text) continue;
+    parts.push({ text, progress: s.kind === "tool" && s.toolId === "progress" });
+  }
+  let out = "";
+  for (let i = 0; i < parts.length; i++) {
+    if (i > 0) out += parts[i - 1]!.progress && parts[i]!.progress ? "\n" : "\n\n";
+    out += parts[i]!.text;
+  }
+  return out;
 }
 
-function quoteThought(text: string): string {
+function formatThought(text: string): string {
   const t = text.trim();
   if (!t) return "";
-  // Keep both ends of long reasoning so early investigation is not lost in the UI.
-  // Truncation is display-only — the agent session retains every thought token.
-  // Neutralize fence markers and half-open emphasis so thinking never breaks
-  // MarkdownV2 parsing of the surrounding live message.
+  // Fence markers and half-open emphasis break MarkdownV2 of the live bubble.
+  // The words themselves are kept in full.
   const safe = t
     .replace(/```+/g, "'''")
     .replace(/\*\*/g, "")
     .replace(/__/g, "")
     .replace(/~~/g, "");
-  const short = truncateMiddle(safe, THINK_DISPLAY_MAX);
-  // A thought is usually one paragraph with no line breaks, and a single line
-  // cannot collapse. Wrap it so the first line stays visible and the rest folds.
-  const lines = wrapWords(short, 100);
-  // Plain "thinking:" (no nested *bold*) — nested markers break mid-stream.
-  return lines.map((l, i) => (i === 0 ? `> \u{1F4AD} thinking: ${l}` : `> ${l}`)).join("\n");
-}
-
-/** Break a paragraph into lines on spaces, keeping each line within `width`. */
-function wrapWords(text: string, width: number): string[] {
-  const out: string[] = [];
-  for (const para of text.split("\n")) {
-    const words = para.split(/\s+/).filter((w) => w.length > 0);
-    let line = "";
-    for (const word of words) {
-      if (line.length > 0 && line.length + 1 + word.length > width) {
-        out.push(line);
-        line = "";
-      }
-      line = line ? `${line} ${word}` : word;
-    }
-    if (line) out.push(line);
-  }
-  return out.length > 0 ? out : [""];
+  return `\u{1F9E0} ${safe}`;
 }

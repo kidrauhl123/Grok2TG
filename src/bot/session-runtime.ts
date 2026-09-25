@@ -22,12 +22,14 @@ import type { SettingsStore } from "../app/settings-store.js";
 import { type PromptInput, type ReasoningEffort, textPrompt } from "../app/types.js";
 import { createLogger } from "../logger.js";
 import { buildTranscript, readHistory } from "../sessions/history.js";
-import { sessionHashtags } from "../render/hashtags.js";
-import { extractProgress, PROGRESS_DIRECTIVE } from "../render/progress.js";
+
+import { BODY_FORMAT_MARKER, bodyFormatDirective } from "../render/body-format.js";
+import { splitBodySegments } from "../render/body-segments.js";
+import { extractProgress, PROGRESS_DIRECTIVE, stripProgressMarkers } from "../render/progress.js";
 import { buildPriming, recentTranscript } from "./session-fork.js";
 import { TailWatcher } from "../sessions/tail.js";
 import type { HistoryEntry } from "../sessions/types.js";
-import { formatToolCall } from "../render/tool-call.js";
+import { formatToolProgressAll } from "../render/tool-progress.js";
 import {
   mergeToolSnapshot,
   snapshotHasDetail,
@@ -116,10 +118,15 @@ import {
   formatRetryNotice,
   RETRY_BASE_MS,
 } from "./prompt-retry.js";
-import { sendMarkdownDoc } from "./telegram-io.js";
+import { sendFinishedBody, sendMarkdownDoc } from "./telegram-io.js";
 import { TypingIndicator } from "./typing.js";
+import { pickWorkingReaction, reactionPayload } from "../render/working-reaction.js";
 
 const log = createLogger("runtime");
+
+/** One piece of a turn, in the order it arrived. A "body" run is narration
+ *  when a "tool" follows it, and the final answer when nothing does. */
+type TurnPart = { kind: "body"; text: string } | { kind: "tool" };
 
 const WATCH_ENTRY_MAX = 700;
 const WATCH_ICON: Record<string, string> = {
@@ -164,6 +171,8 @@ export class SessionRuntime {
   private streamer: ResponseStreamer | undefined;
   private readonly typing: TypingIndicator;
   private shownToolIds = new Set<string>();
+  /** Previous tool line was a fenced terminal block (Hermes header collapse). */
+  private lastToolWasTerminal = false;
   /** toolCallId → merged snapshot so completed updates keep title/args. */
   private toolCallCache = new Map<string, ToolSnapshot>();
   /** Files touched this turn (path -> operation), tracked even in background so
@@ -185,6 +194,8 @@ export class SessionRuntime {
   private turnCount = 0;
   /** Telegram message id of the current turn's prompt, so replies thread to it. */
   private turnReplyTo: number | undefined;
+  /** Emoji this turn put on the user's message. Cleared once the answer is out. */
+  private turnReaction: string | undefined;
   /** Short id for `#prompt_<id>` on all AI messages of this turn. */
   private turnPromptId: string | undefined;
   private imageScanText = "";
@@ -275,6 +286,11 @@ export class SessionRuntime {
   private turnUserText = "";
   /** Assistant prose streamed this turn — used for suggestions / completion. */
   private turnAssistantText = "";
+  /** Body and tool calls in arrival order, so narration before a tool call
+   *  can be sent as its own message and only the last body stays the answer. */
+  private turnParts: TurnPart[] = [];
+  /** The finished answer was already sent, so a later error path does not send it again. */
+  private answerPublished = false;
   /** Quiet meta capture (suggestions) — never stream to Telegram. */
   private capturingQuiet = false;
   private quietCaptureBuf = "";
@@ -475,6 +491,41 @@ export class SessionRuntime {
     return built || undefined;
   }
 
+  /**
+   * Mark the user's message with one random emoji while the turn runs, in place
+   * of the old "Working…" bubble. A bot may set one reaction, and only on a
+   * message it can see, so this needs the user's message id.
+   */
+  private async setWorkingReaction(): Promise<void> {
+    const messageId = this.turnReplyTo;
+    if (messageId === undefined || this.turnReaction) return;
+    const emoji = pickWorkingReaction();
+    try {
+      await this.api.setMessageReaction(this.chatId, messageId, reactionPayload(emoji));
+      this.turnReaction = emoji;
+    } catch (e) {
+      log.debug(`reaction failed: ${(e as Error).message}`);
+    }
+  }
+
+  /** Take the emoji back off. Called after the finished answer has been sent. */
+  private async clearWorkingReaction(): Promise<void> {
+    const messageId = this.turnReplyTo;
+    if (messageId === undefined || !this.turnReaction) return;
+    this.turnReaction = undefined;
+    try {
+      await this.api.setMessageReaction(this.chatId, messageId, reactionPayload(null));
+    } catch (e) {
+      log.debug(`clear reaction failed: ${(e as Error).message}`);
+    }
+  }
+
+  /** A new turn starts a fresh Hermes "all" tool list. */
+  private resetShownTools(): void {
+    this.shownToolIds = new Set();
+    this.lastToolWasTerminal = false;
+  }
+
   /** Update the live step (tools/plan) — kept for diagnostics; cards use user+thinking. */
   private setLiveStep(step: string | undefined): void {
     const next = step?.trim() ? cleanCommentLine(step) : undefined;
@@ -536,10 +587,9 @@ export class SessionRuntime {
     }
   }
 
-  /** Searchable hashtag footer for this session (project В· session В· model В·
-   *  reasoning) вЂ” appended to every AI-output surface for this session. */
+  /** Hashtag footer. Empty: replies no longer end with #proj_ / #sess_ / #prompt_. */
   get tags(): string {
-    return this.hashtags();
+    return "";
   }
 
   /** Switch live-streaming on/off. Going background seals any in-flight turn;
@@ -580,12 +630,21 @@ export class SessionRuntime {
         const prev = this.streamer;
         this.streamer = undefined;
         void prev.finalize().catch(() => {});
+        void this.clearWorkingReaction();
       }
     }
     this.changed();
   }
   get reasoning(): ReasoningEffort {
     return this.settings.getKey(this.settingsKey).reasoning;
+  }
+  /** Final-answer format for this chat. Unset follows RICH_MESSAGES. */
+  get richMessages(): boolean {
+    return this.settings.getKey(this.settingsKey).richMessages ?? this.cfg.richMessages;
+  }
+  setRichMessages(on: boolean): void {
+    this.settings.updateKey(this.settingsKey, { richMessages: on });
+    this.changed();
   }
   get agent(): string | undefined {
     return this.settings.getKey(this.settingsKey).agent;
@@ -887,6 +946,21 @@ export class SessionRuntime {
     this.telegramBridgeSteered.add(this.sessionId);
   }
 
+  /** One-line format hint, current switch, on every real user turn. */
+  private applyBodyFormat(input: PromptInput): PromptInput {
+    if (input.rawSlashCommand) return input;
+    if (
+      input.skipSelfRecheck ||
+      isSelfRecheckPrompt(input.text) ||
+      isTelegramBridgeResultsPrompt(input.text) ||
+      isManagerWorkReportPrompt(input.text)
+    ) {
+      return input;
+    }
+    if (input.text.includes(BODY_FORMAT_MARKER)) return input;
+    return { ...input, text: `${bodyFormatDirective(this.richMessages)}\n\n${input.text}` };
+  }
+
   private telegramBridgeDirective(): string {
     return buildTelegramBridgeDirective({
       forumReady: !!this.bridge?.forum?.isReady,
@@ -1101,6 +1175,7 @@ export class SessionRuntime {
     // Apply before any turn bookkeeping so card previews / logs see the wrapped
     // text the same way the agent does (also covers flushQueue first messages).
     input = this.applyFirstPromptSteering(input);
+    input = this.applyBodyFormat(input);
     input = this.applyManagerContext(input);
 
     this.busy = true;
@@ -1109,6 +1184,8 @@ export class SessionRuntime {
     this.turnPromptId = input.promptId;
     this.turnUserText = input.text;
     this.turnAssistantText = "";
+    this.turnParts = [];
+    this.answerPublished = false;
     this.cardThinking = "";
     this.turnExpectDone = false;
     this.turnDonePinged = false;
@@ -1158,7 +1235,7 @@ export class SessionRuntime {
     if (this.pendingReportBack && this.sessionId) {
       bindJobSession(this.pendingReportBack.jobId, this.sessionId);
     }
-    this.shownToolIds = new Set();
+    this.resetShownTools();
     this.toolCallCache = new Map();
     this.fileOps = new Map();
     this.subagentShown = new Map();
@@ -1167,15 +1244,9 @@ export class SessionRuntime {
     this.subagentToolCache = new Map();
     this.planEntries = undefined; // plan board is per-turn
     this.pendingSuggestions = undefined; // new work supersedes previous Done suggestions
-    this.setLiveStep(
-      this.isSelfRecheckTurn
-        ? "Self-recheck: hunting bugs / incomplete logic\u2026"
-        : input.text.trim()
-          ? `Working: ${cleanUserPreview(input.text, 110)}`
-          : input.images.length
-            ? "Working on attached image(s)\u2026"
-            : "Working\u2026",
-    );
+    // The "Working…" bubble is gone. A reaction on the user's message stands in
+    // for it, and it comes off once the finished answer is sent.
+    if (this.foreground && !this.managerMode) void this.setWorkingReaction();
     // A new streamed turn supersedes any transient "follow" watch of this same
     // session's previous in-flight turn (avoids duplicated output).
     if (this.watchIsFollow) this.stopWatch();
@@ -1223,13 +1294,6 @@ export class SessionRuntime {
             : undefined,
         )
       : undefined;
-    // Seed a live bubble immediately so the Working / subagent cards have a
-    // message to edit before the first ACP chunk (long crew waits).
-    // The user message is kept, so this must be a new bot message: bots cannot
-    // edit someone else's message, and thinking would otherwise never appear.
-    if (this.streamer && live && !this.managerMode) {
-      void this.streamer.ensureLiveSurface("\u23F3 Working\u2026").catch(() => {});
-    }
     // Bind user message (+ status bubble) → session for reply routing.
     if (this.managerMode && this.sessionId) {
       if (this.turnReplyTo !== undefined) {
@@ -1275,6 +1339,7 @@ export class SessionRuntime {
       if (resumed) final = resumed;
       const streamedOutput = this.streamer?.hasOutput ?? false;
       if (this.streamer) await this.streamer.finalize();
+      await this.publishFinishedAnswer();
       if (this.foreground) await this.sendTurnImages();
 
       // Telegram bridge actions (JSON fences in the agent reply). Process on
@@ -1544,6 +1609,7 @@ export class SessionRuntime {
     } catch (err) {
       // Unexpected failure outside the prompt path (e.g. while finalizing).
       await this.streamer?.finalize().catch(() => {});
+      await this.publishFinishedAnswer().catch(() => {});
       const errMsg = (err as Error).message;
       this.persistCardUserPrompt();
       this.cardThinking = "";
@@ -1642,6 +1708,7 @@ export class SessionRuntime {
         }
       }
       this.turnExpectDone = false;
+      if (!this.answerPublished) await this.clearWorkingReaction();
       this.typing.stop();
       this.stopActivityHeartbeat();
       this.stopLivenessPulse();
@@ -2242,8 +2309,6 @@ export class SessionRuntime {
       const md = renderSubagentTransition(s, kind);
       if (md) this.streamer.addTool(md);
     }
-    // Ensure pulse has a surface even if no status transition this tick.
-    void this.streamer.ensureLiveSurface("\u23F3 Working\u2026").catch(() => {});
   }
 
   /**
@@ -2288,21 +2353,15 @@ export class SessionRuntime {
       const merged = mergeToolSnapshot(this.subagentToolCache.get(cacheKey), update);
       this.subagentToolCache.set(cacheKey, merged);
       const status = (update.status || "").toLowerCase();
-      if (!snapshotHasDetail(merged) && status !== "completed" && status !== "failed") return;
-      if (kind === "tool_call_update" && (status === "pending" || status === "in_progress")) {
-        const hasNew =
-          (Array.isArray(update.content_blocks) && update.content_blocks.length > 0) ||
-          (Array.isArray(update.content) && (update.content as unknown[]).length > 0) ||
-          (!!update.rawInput && Object.keys(update.rawInput).length > 0) ||
-          update.rawOutput !== undefined;
-        if (!hasNew && this.shownToolIds.has(`sub:${cacheKey}`)) return;
+      const subKey = `sub:${cacheKey}`;
+      if (!this.shownToolIds.has(subKey) && snapshotHasDetail(merged)) {
+        const line = formatToolProgressAll(merged, { dropTerminalHeader: this.lastToolWasTerminal });
+        if (line) {
+          this.lastToolWasTerminal = line.terminal;
+          this.shownToolIds.add(subKey);
+          this.streamer.appendProgressLine(line.text);
+        }
       }
-      const md = formatToolCall(merged, {
-        showDiffs: this.cfg.showEditDiffs,
-        diffMaxLines: Math.min(40, this.cfg.diffMaxLines),
-      });
-      if (!md) return;
-      this.shownToolIds.add(`sub:${cacheKey}`);
       const step = stepFromToolUpdate(merged);
       if (step) {
         this.setLiveStep(`\u{1F916} ${label}: ${step}`);
@@ -2313,7 +2372,6 @@ export class SessionRuntime {
       ) {
         this.setLiveStep(`\u{1F916} ${label}: Working\u2026`);
       }
-      this.streamer.upsertTool(`sub:${cacheKey}`, `\u{1F916} **${label}**\n${md}`);
     }
   }
 
@@ -2355,7 +2413,7 @@ export class SessionRuntime {
       this.sessionLive = false;
       this.rebindPending = Boolean(previousId);
       await this.ensureSession();
-      this.shownToolIds = new Set();
+      this.resetShownTools();
       this.subagentShown = new Map();
       this.streamer?.setFooter(this.hashtags());
       const retryContent = buildContentBlocks(input, {
@@ -2416,7 +2474,7 @@ export class SessionRuntime {
       `chat ${this.chatId} auto-forked ${lostId.slice(0, 8)} -> ${this.sessionId!.slice(0, 8)} after ${contextRelated ? "context-exhaustion" : "transient"} error`,
     );
     // Reset per-turn render state so the retry streams cleanly on the new session.
-    this.shownToolIds = new Set();
+    this.resetShownTools();
     this.subagentShown = new Map();
     this.streamer?.setFooter(this.hashtags()); // streamed reply tags the NEW session
     const forkContent = buildContentBlocks(input, {
@@ -2466,7 +2524,7 @@ export class SessionRuntime {
         } catch (error) {
           return { error: error as Error, attempts: final.attempts };
         }
-        this.shownToolIds = new Set();
+        this.resetShownTools();
         this.subagentShown = new Map();
         this.streamer?.setFooter(this.hashtags());
         const content = buildContentBlocks(input, {
@@ -2511,7 +2569,7 @@ export class SessionRuntime {
         continue;
       }
       // Reset per-turn render state so the retry streams cleanly.
-      this.shownToolIds = new Set();
+      this.resetShownTools();
       this.subagentShown = new Map();
       this.streamer?.setFooter(this.hashtags());
       const content = buildContentBlocks(input, {
@@ -2578,6 +2636,7 @@ export class SessionRuntime {
         // starts, so the busy gate drops it. Show the cached panel instead of
         // treating the turn as empty and retrying.
         if (this.sessionUpdateCount === updatesBeforePrompt && !this.sawTurnActivity && this.memoryPanel) {
+          this.noteAnswerText(this.memoryPanel);
           this.streamer?.appendOutput(this.memoryPanel);
           this.sawTurnActivity = true;
           this.attachMemoryPanel();
@@ -2715,15 +2774,10 @@ export class SessionRuntime {
    *  a background turn gets a labelled "other session" ping with short counts. */
   private completionMessage(stopReason: string | undefined, startedAt: number, streamedOutput: boolean): string {
     const head = this.doneHead(stopReason, startedAt, streamedOutput);
-    const tags = this.hashtags();
     const base = `${head}\n${summarizeFileOps(this.fileOps, this.cwd)}`;
-    this.lastCompletion = `${base}\n\n${tags}`; // switch-replay stays searchable
-    if (this.foreground) {
-      // The streamed response already carries the tag footer; only add tags to
-      // the Done line when there was no response to tag (tool-only / no output).
-      return streamedOutput ? base : `${base}\n\n${tags}`;
-    }
-    return `\u{1F4E8} From other session ${this.sessionTag()}\n${head}\n${summarizeFileOpsShort(this.fileOps)}\n\n${tags}`;
+    this.lastCompletion = base;
+    if (this.foreground) return base;
+    return `\u{1F4E8} From other session ${this.sessionTag()}\n${head}\n${summarizeFileOpsShort(this.fileOps)}`;
   }
 
   /** Soft completion for General manager (no file-ops / progress spam). */
@@ -2840,16 +2894,13 @@ export class SessionRuntime {
     streamedOutput: boolean,
   ): string {
     const head = this.doneHead(stopReason, startedAt, streamedOutput);
-    const tags = this.hashtags();
     const files = summarizeFileOpsSplit(this.preRecheckFileOps, this.fileOps, this.cwd);
     const base = `${head}\n${files}`;
-    this.lastCompletion = `${base}\n\n${tags}`;
-    if (this.foreground) {
-      return streamedOutput ? base : `${base}\n\n${tags}`;
-    }
+    this.lastCompletion = base;
+    if (this.foreground) return base;
     return (
       `\u{1F4E8} From other session ${this.sessionTag()}\n${head}\n` +
-      `${summarizeFileOpsShort(this.preRecheckFileOps)} \u2192 recheck ${summarizeFileOpsShort(this.fileOps)}\n\n${tags}`
+      `${summarizeFileOpsShort(this.preRecheckFileOps)} \u2192 recheck ${summarizeFileOpsShort(this.fileOps)}`
     );
   }
 
@@ -2874,11 +2925,10 @@ export class SessionRuntime {
   private errorMessage(error: Error, startedAt: number, attempts: number, transient: boolean): string {
     const summary = formatErrorSummary(error, fmtDuration(Date.now() - startedAt), attempts, transient);
     const files = this.fileOps.size > 0 ? `\n${summarizeFileOps(this.fileOps, this.cwd)}` : "";
-    const tags = this.hashtags();
-    this.lastCompletion = `${summary}${files}\n\n${tags}`;
+    this.lastCompletion = `${summary}${files}`;
     if (this.foreground) return this.lastCompletion;
     const shortFiles = this.fileOps.size > 0 ? `\n${summarizeFileOpsShort(this.fileOps)}` : "";
-    return `\u{1F4E8} From other session ${this.sessionTag()}\n${summary}${shortFiles}\n\n${tags}`;
+    return `\u{1F4E8} From other session ${this.sessionTag()}\n${summary}${shortFiles}`;
   }
 
   /** "[project В· 1a2b3c4d]" вЂ” identifies which background session a ping is from. */
@@ -2896,18 +2946,9 @@ export class SessionRuntime {
     return new InlineKeyboard().text("\u{1F500} Switch to this session", `run:switch:${this.sessionId}`);
   }
 
-  /** Searchable Telegram hashtags so you can pull up every message of a session
-   *  or project (and this turn's prompt) by tapping the tag. */
+  /** Reply footers no longer carry #proj_ / #sess_ / #prompt_. */
   private hashtags(): string {
-    // General manager: no tags (user requested clean chat). Reply routing uses
-    // Telegram message-id → session map, not #sess_ footers.
-    if (this.managerMode) return "";
-    return sessionHashtags({
-      projectName: this.projectName,
-      cwd: this.cwd,
-      sessionId: this.sessionId,
-      promptId: this.turnPromptId,
-    });
+    return "";
   }
 
   private async flushQueue(): Promise<void> {
@@ -2993,7 +3034,9 @@ export class SessionRuntime {
       // A /memory panel returns its file list here and no prose. Show it and
       // count it, or the turn looks empty and the bridge retries the command.
       this.sawTurnActivity = true;
-      this.streamer?.appendOutput(renderMemoryFiles(update));
+      const memoryText = renderMemoryFiles(update);
+      this.noteAnswerText(memoryText);
+      this.streamer?.appendOutput(memoryText);
     }
 
     // Quiet meta turns (follow-up suggestions): capture prose only, never stream.
@@ -3009,6 +3052,8 @@ export class SessionRuntime {
     // session is in the background (its output isn't streamed here, but the
     // completion message still reports what changed / which images were made).
     if (kind === "tool_call" || kind === "tool_call_update") {
+      const last = this.turnParts.at(-1);
+      if (!last || last.kind !== "tool") this.turnParts.push({ kind: "tool" });
       // Merge early so background live-step + file ops use full title/args.
       const tid = update.toolCallId || "";
       const mergedEarly = mergeToolSnapshot(tid ? this.toolCallCache.get(tid) : undefined, update);
@@ -3038,6 +3083,9 @@ export class SessionRuntime {
       if (text) {
         this.imageScanText += text;
         this.turnAssistantText += text;
+        const last = this.turnParts.at(-1);
+        if (last?.kind === "body") last.text += text;
+        else this.turnParts.push({ kind: "body", text });
       }
     } else if (kind === "agent_thought_chunk") {
       // Thought text is already the quoted block in the live bubble.
@@ -3076,42 +3124,20 @@ export class SessionRuntime {
     if (kind === "tool_call" || kind === "tool_call_update") {
       if (!this.cfg.showToolCalls) return;
       const id = update.toolCallId || "";
-      const status = (update.status || "").toLowerCase();
 
       // Snapshot already merged above for file-ops / live step.
       const merged = (id && this.toolCallCache.get(id)) || mergeToolSnapshot(undefined, update);
 
-      // Skip hollow shells with nothing useful yet.
-      if (!snapshotHasDetail(merged) && status !== "completed" && status !== "failed") {
-        return;
-      }
-
-      // Status-only mid-flight patches (no new content/input): skip if we already
-      // painted this tool once — upsert would be a no-op anyway.
-      if (kind === "tool_call_update" && (status === "pending" || status === "in_progress")) {
-        const hasNewContent =
-          (Array.isArray(update.content_blocks) && update.content_blocks.length > 0) ||
-          (Array.isArray(update.content) && (update.content as unknown[]).length > 0) ||
-          (!!update.rawInput && Object.keys(update.rawInput).length > 0) ||
-          update.rawOutput !== undefined;
-        const key = id || `tool_call:${update.title ?? ""}`;
-        if (!hasNewContent && this.shownToolIds.has(key)) return;
-      }
-
-      const md = formatToolCall(merged, {
-        showDiffs: this.cfg.showEditDiffs,
-        diffMaxLines: this.cfg.diffMaxLines,
-      });
-      if (!md) return;
-
-      // One live card per toolCallId: replace in place as output streams
-      // (no spam of new code sections). Session/agent context keeps full output.
+      // Hermes "all": one line when the call starts. Later output does not rewrite it.
       const key = id || `tool_call:${merged.title ?? merged.name ?? ""}`;
-      this.shownToolIds.add(key);
-      if (status === "completed" || status === "failed") {
-        this.shownToolIds.add(key + ":done");
+      if (!this.shownToolIds.has(key) && snapshotHasDetail(merged)) {
+        const line = formatToolProgressAll(merged, { dropTerminalHeader: this.lastToolWasTerminal });
+        if (line) {
+          this.lastToolWasTerminal = line.terminal;
+          this.shownToolIds.add(key);
+          this.streamer.appendProgressLine(line.text);
+        }
       }
-      this.streamer.upsertTool(id || undefined, md);
     }
   }
 
@@ -3145,6 +3171,49 @@ export class SessionRuntime {
    * On failure, retries once truncated (~3500) without reply_markup so a long
    * Done / markup error cannot silently drop the completion ping.
    */
+  /** Remember answer text that did not arrive as an agent_message_chunk. */
+  private noteAnswerText(text: string | undefined): void {
+    const next = text?.trim();
+    if (!next || this.turnAssistantText.includes(next)) return;
+    this.turnAssistantText += (this.turnAssistantText ? "\n\n" : "") + next;
+  }
+
+  /**
+   * Send the finished answer once, after generation. Thoughts and tool cards
+   * have already been flushed. Rich on uses one rich message; rich off uses
+   * MarkdownV2 and rewrites any pipe table the model still emitted.
+   */
+  private async publishFinishedAnswer(): Promise<void> {
+    if (this.answerPublished) return;
+    const clean = (text: string): string =>
+      stripProgressMarkers(stripTelegramActionFences(text)).trim();
+    // Narration written before a tool call is its own message. Only the body
+    // after the last tool call — or all of it, when the turn used no tools —
+    // is the final answer.
+    const { process, answer } = splitBodySegments(
+      this.turnParts.map((part) =>
+        part.kind === "body" ? { kind: "body", text: clean(part.text) } : part,
+      ),
+    );
+    if (!answer && process.length === 0) return;
+    this.answerPublished = true;
+    const extra: Record<string, unknown> = { ...outboundThreadExtra(this.messageThreadId) };
+    if (this.turnReplyTo !== undefined) {
+      extra.reply_parameters = { message_id: this.turnReplyTo, allow_sending_without_reply: true };
+    }
+    for (const segment of process) {
+      const id = await sendFinishedBody(this.api, this.chatId, segment, this.richMessages, extra);
+      if (id !== undefined && this.sessionId) this.onTelegramMessageBound?.(id, this.sessionId);
+    }
+    if (!answer) {
+      await this.clearWorkingReaction();
+      return;
+    }
+    const id = await sendFinishedBody(this.api, this.chatId, answer, this.richMessages, extra);
+    if (id !== undefined && this.sessionId) this.onTelegramMessageBound?.(id, this.sessionId);
+    await this.clearWorkingReaction();
+  }
+
   private async notify(
     text: string,
     opts?: { loud?: boolean; replyTo?: number; replyMarkup?: InlineKeyboard },
@@ -3212,7 +3281,7 @@ export class SessionRuntime {
       .filter(Boolean)
       .join("\n\n");
     if (body.trim()) {
-      await sendMarkdownDoc(this.api, this.chatId, `${body}\n\n${this.tags}`, {
+      await sendMarkdownDoc(this.api, this.chatId, body, {
         messageThreadId: this.messageThreadId,
       });
     }
