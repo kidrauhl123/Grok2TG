@@ -106,8 +106,9 @@ export interface SessionUpdate {
   [k: string]: unknown;
 }
 
-/** Render a Grok /memory panel into text. The panel returns no prose, only a
- *  memory_files update, so without this the turn looks empty and gets retried. */
+/** Render a Grok /memory panel into text plus the file paths it lists. The panel
+ *  returns no prose, only a memory_files update, so without this the turn looks
+ *  empty and gets retried. */
 export function renderMemoryFiles(update: SessionUpdate): string {
   const files = Array.isArray(update.files) ? (update.files as Array<Record<string, unknown>>) : [];
   const lines = files.map((f) => {
@@ -124,6 +125,13 @@ export function renderMemoryFiles(update: SessionUpdate): string {
   const body = lines.length ? lines.join("\n") : "No memory files.";
   return `Memory\n${body}\n${flags.join(" · ")}`;
 }
+
+/** Absolute paths of the markdown files a memory_files panel lists. */
+export function memoryFilePaths(update: SessionUpdate): string[] {
+  const files = Array.isArray(update.files) ? (update.files as Array<Record<string, unknown>>) : [];
+  return files.map((f) => String(f.path ?? "")).filter((p) => p.startsWith("/"));
+}
+
 export interface ToolCallContent {
   type: "content" | "diff" | "terminal" | string;
   path?: string;

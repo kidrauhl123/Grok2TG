@@ -16,7 +16,7 @@ import {
 } from "../grok/client.js";
 import type { GrokPool } from "../grok/pool.js";
 import type { AccountRotator } from "./account-rotator.js";
-import { contentText, renderMemoryFiles, type ContentBlock, type PromptResult, type SessionUpdate } from "../grok/types.js";
+import { contentText, memoryFilePaths, renderMemoryFiles, type ContentBlock, type PromptResult, type SessionUpdate } from "../grok/types.js";
 import type { AppConfig } from "../config.js";
 import type { SettingsStore } from "../app/settings-store.js";
 import { type PromptInput, type ReasoningEffort, textPrompt } from "../app/types.js";
@@ -193,6 +193,10 @@ export class SessionRuntime {
   private sessionUpdateCount = 0;
   /** A session/update that means the turn did real work even with no text. */
   private sawTurnActivity = false;
+  /** Latest memory panel for the session, even when it arrives before the turn. */
+  private memoryPanel: string | null = null;
+  /** Markdown files the latest panel listed, sent as documents with it. */
+  private memoryPaths: string[] = [];
   private readonly listener: (sessionId: string, update: SessionUpdate) => void;
   private readonly planExitListener: (sessionId: string | undefined, result: unknown) => void;
   private primingContext: string | undefined;
@@ -2570,6 +2574,14 @@ export class SessionRuntime {
         // report a successful end-turn after an upstream model failure; never
         // present that as a completed user request.
         await sleep(0);
+        // /memory answers with a memory_files panel that arrives before the turn
+        // starts, so the busy gate drops it. Show the cached panel instead of
+        // treating the turn as empty and retrying.
+        if (this.sessionUpdateCount === updatesBeforePrompt && !this.sawTurnActivity && this.memoryPanel) {
+          this.streamer?.appendOutput(this.memoryPanel);
+          this.sawTurnActivity = true;
+          this.attachMemoryPanel();
+        }
         // A slash builtin such as /compact finishes with only a compaction
         // event and no text. That is the command succeeding, not an empty turn.
         if (this.sessionUpdateCount === updatesBeforePrompt && !this.sawTurnActivity) {
@@ -2921,7 +2933,45 @@ export class SessionRuntime {
     void this.runTurn(batch);
   }
 
+  /** Send the three memory switches and the markdown files the panel listed. */
+  private attachMemoryPanel(): void {
+    void this.sendMemoryControls();
+  }
+
+  private async sendMemoryControls(): Promise<void> {
+    const { InputFile } = await import("grammy");
+    const token = (this.sessionId ?? "").slice(0, 8);
+    const kb = new InlineKeyboard()
+      .text("Memory", `mem:${token}:memory`)
+      .text("Capture", `mem:${token}:capture`)
+      .text("Dream", `mem:${token}:dream`);
+    const extra = { ...outboundThreadExtra(this.messageThreadId), reply_markup: kb };
+    try {
+      await this.api.sendMessage(this.chatId, "Toggle a memory switch:", extra);
+    } catch (e) {
+      log.debug("memory buttons failed:", (e as Error).message);
+    }
+    for (const path of this.memoryPaths) {
+      try {
+        await this.api.sendDocument(this.chatId, new InputFile(path), outboundThreadExtra(this.messageThreadId));
+      } catch (e) {
+        log.debug("memory file send failed:", (e as Error).message);
+      }
+    }
+  }
+
+  /** Flip one memory switch for this session and return what grok answered. */
+  async toggleMemory(which: "memory" | "capture" | "dream"): Promise<unknown> {
+    if (!this.sessionId) throw new Error("no session");
+    return this.acp.toggleMemory(this.sessionId, which);
+  }
+
   private onUpdate(sessionId: string, update: SessionUpdate): void {
+    if (update.sessionUpdate === "memory_files") {
+      const rendered = renderMemoryFiles(update);
+      if (rendered) this.memoryPanel = rendered;
+      this.memoryPaths = memoryFilePaths(update);
+    }
     if (!this.busy) return;
     // Child crew sessions: mirror tools/thoughts into the parent live bubble.
     if (sessionId !== this.sessionId) {

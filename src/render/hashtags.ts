@@ -4,7 +4,6 @@
  * appended to every AI-output surface: live streams, Done/error summaries, the
  * history/unread you see when switching back to a session, and live watch.
  */
-import { basename } from "node:path";
 
 export interface TagInput {
   projectName?: string;
@@ -25,13 +24,15 @@ export function tagSafe(v: string): string {
 }
 
 /**
- * Build the hashtag footer. `#proj_` is always present; `#sess_` is added only
- * when the session id is known, so partial callers (e.g. a static /history view)
- * still tag consistently. `#prompt_` is added when a turn-level id is known.
- * Order: project · session · prompt.
+ * Build the hashtag footer. `#proj_` is added only when a project was actually
+ * bound — a topic that just sits on the shared workspace has no project, and
+ * falling back to the directory name would print a tag for a project that does
+ * not exist. `#sess_` is added when the session id is known, `#prompt_` when a
+ * turn-level id is known. Order: project · session · prompt.
  */
 export function sessionHashtags(input: TagInput): string {
-  const tags = [`#proj_${tagSafe(input.projectName || basename(input.cwd || "") || "none")}`];
+  const tags: string[] = [];
+  if (input.projectName?.trim()) tags.push(`#proj_${tagSafe(input.projectName)}`);
   if (input.sessionId) tags.push(`#sess_${tagSafe(input.sessionId.slice(0, 8))}`);
   if (input.promptId) tags.push(`#prompt_${tagSafe(input.promptId)}`);
   return tags.join(" ");

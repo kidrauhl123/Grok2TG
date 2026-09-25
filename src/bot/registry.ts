@@ -154,6 +154,11 @@ export class RuntimeRegistry {
     return this.forumController(chatId, threadId, cwd, projectName).foreground();
   }
 
+  /** All private-chat controllers. */
+  allControllers(): ChatController[] {
+    return [...this.controllers.values()];
+  }
+
   /** All forum topic controllers (for bidirectional session listing). */
   allForumControllers(): ChatController[] {
     return [...this.forumControllers.values()];

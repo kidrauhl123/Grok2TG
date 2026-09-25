@@ -23,7 +23,7 @@ import { Scheduler } from "../tasks/scheduler.js";
 import { TaskStore } from "../tasks/store.js";
 import { createAuthMiddleware } from "./auth.js";
 import { isStaleCallbackError, safeCallbackMiddleware } from "./callback.js";
-import { COMMANDS, GROUP_COMMANDS } from "./commands.js";
+import { COMMANDS } from "./commands.js";
 import { type BotDeps, MenuCache } from "./deps.js";
 import { registerControl } from "./handlers/control.js";
 import { registerDocuments } from "./handlers/document.js";
@@ -271,6 +271,27 @@ export async function createBot(cfg: AppConfig, pool: GrokPool): Promise<BotBund
     await ctx.answerCallbackQuery({ text: toast ?? "Expired" });
   });
 
+  // Memory panel switches. The token is the session id prefix; flip that switch
+  // through grok and report the new state. The change is for this session only.
+  bot.callbackQuery(/^mem:([0-9a-f]+):(memory|capture|dream)$/, async (ctx) => {
+    const token = ctx.match![1]!;
+    const which = ctx.match![2] as "memory" | "capture" | "dream";
+    const hit = [...deps.registry.allForumControllers(), ...deps.registry.allControllers()].find((c) =>
+      (c.foreground().sessionId ?? "").startsWith(token),
+    );
+    const rt = hit?.foreground();
+    if (!rt?.sessionId) {
+      await ctx.answerCallbackQuery({ text: "Session gone — send /memory again" });
+      return;
+    }
+    try {
+      await rt.toggleMemory(which);
+      await ctx.answerCallbackQuery({ text: `${which} toggled` });
+    } catch (e) {
+      await ctx.answerCallbackQuery({ text: `Failed: ${(e as Error).message.slice(0, 40)}` });
+    }
+  });
+
   // Legacy complexity buttons (removed — agent decides; auto-plan if complex).
   bot.callbackQuery(/^cplx:(simple|complex)$/, async (ctx) => {
     await ctx.answerCallbackQuery({ text: "Complexity is automatic now" });
@@ -433,13 +454,11 @@ export async function createBot(cfg: AppConfig, pool: GrokPool): Promise<BotBund
   };
   await registerCommands(COMMANDS, undefined, "default");
   await registerCommands(COMMANDS, { type: "all_private_chats" }, "private");
-  await registerCommands(GROUP_COMMANDS, { type: "all_group_chats" }, "groups");
+  // Groups get the same list as private chats. The short GROUP_COMMANDS subset
+  // hid every Grok builtin, so /memory and the rest never appeared in a topic.
+  await registerCommands(COMMANDS, { type: "all_group_chats" }, "groups");
   if (cfg.topicGroupId !== undefined) {
-    await registerCommands(
-      GROUP_COMMANDS,
-      { type: "chat", chat_id: cfg.topicGroupId },
-      `chat:${cfg.topicGroupId}`,
-    );
+    await registerCommands(COMMANDS, { type: "chat", chat_id: cfg.topicGroupId }, `chat:${cfg.topicGroupId}`);
   }
 
   const updater = new Updater({

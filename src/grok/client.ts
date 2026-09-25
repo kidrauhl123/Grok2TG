@@ -676,6 +676,11 @@ export class GrokClient extends EventEmitter {
     return this.request("_grok.dev/commands/execute", { sessionId, command });
   }
 
+  /** Flip one memory switch for this session. `which` is memory, capture or dream. */
+  async toggleMemory(sessionId: string, which: "memory" | "capture" | "dream"): Promise<unknown> {
+    return this.request("x.ai/memory/toggle", { sessionId, toggle: which });
+  }
+
   /** Update spawn-time agent env (applied on the next `grok agent` restart). */
   setAgentOptions(opts: { sandboxProfile?: string; grokMemory?: string }): void {
     if (opts.sandboxProfile !== undefined) this.opts.sandboxProfile = opts.sandboxProfile;
@@ -879,7 +884,7 @@ export class GrokClient extends EventEmitter {
     if (method === "session/update" || method === "_grok.dev/metadata" || method === "_grok.dev/subagent/list_update") {
       this.lastActivityAny = Date.now();
     }
-    if (method === "session/update") {
+    if (method === "session/update" || method === "_x.ai/session/update") {
       const p = params as SessionNotificationParams;
       if (p?.sessionId && p.update) {
         this.lastActivity.set(p.sessionId, Date.now());
