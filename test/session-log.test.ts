@@ -49,3 +49,21 @@ test("SessionStore lists sessions and detects the lock", () => {
   slog.unlock(id);
   assert.equal(store.get(id)!.active, false, "after unlock the session is idle");
 });
+
+test("interruptedSessions reports a lock left by a dead process", () => {
+  const slog = new SessionLog(dir);
+  const dead = "grok-interrupted";
+  const live = "grok-running";
+  slog.create(dead, "/tmp/p3");
+  slog.create(live, "/tmp/p4");
+  slog.lock(dead, 2_147_000_000); // a pid that is not alive
+  slog.lock(live, process.pid);
+
+  const cut = slog.interruptedSessions();
+  assert.ok(cut.includes(dead), "a lock held by a dead process is an unfinished turn");
+  assert.ok(!cut.includes(live), "a lock held by a live process is a turn in progress");
+
+  slog.unlock(dead);
+  slog.unlock(live);
+  assert.deepEqual(slog.interruptedSessions(), [], "no locks means nothing to resume");
+});

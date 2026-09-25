@@ -9,9 +9,10 @@
  *   <sessionsDir>/<id>.jsonl   event log (Prompt / AssistantMessage / ToolUse)
  *   <sessionsDir>/<id>.lock    { pid } while a turn is running (drives "active")
  */
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createLogger } from "../logger.js";
+import { isPidAlive } from "../sessions/store.js";
 
 const log = createLogger("grok:session-log");
 
@@ -160,5 +161,31 @@ export class SessionLog {
     } catch {
       /* best-effort */
     }
+  }
+
+  /**
+   * Sessions whose turn never finished. A lock is written when a turn starts and
+   * removed when it ends, so one left behind by a dead process means the turn was
+   * cut off — the marker a restart uses to resume it. A lock held by a process
+   * that is still alive is a turn in progress, not a leftover, so it is skipped.
+   */
+  interruptedSessions(): string[] {
+    let files: string[];
+    try {
+      files = readdirSync(this.dir).filter((f) => f.endsWith(".lock"));
+    } catch {
+      return [];
+    }
+    const out: string[] = [];
+    for (const file of files) {
+      try {
+        const lock = JSON.parse(readFileSync(join(this.dir, file), "utf-8")) as { pid?: number };
+        if (typeof lock.pid === "number" && isPidAlive(lock.pid)) continue;
+      } catch {
+        /* unreadable lock: still a turn that never finished */
+      }
+      out.push(file.replace(/\.lock$/, ""));
+    }
+    return out;
   }
 }

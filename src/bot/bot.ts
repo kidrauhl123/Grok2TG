@@ -5,6 +5,7 @@
  */
 import { Bot } from "grammy";
 import type { GrokPool } from "../grok/pool.js";
+import { SessionLog } from "../grok/session-log.js";
 import { AccountManager } from "../app/accounts.js";
 import { AccountRotatorImpl } from "./account-rotator.js";
 import { SettingsStore } from "../app/settings-store.js";
@@ -484,5 +485,46 @@ export async function createBot(cfg: AppConfig, pool: GrokPool): Promise<BotBund
     });
   }
 
+  // A lock file is written when a turn starts and removed when it ends. One left
+  // behind by a process that is no longer alive is a turn the restart cut off —
+  // resume it in the topic that still has that session in the foreground.
+  void resumeInterruptedTurns(cfg, settings, registry);
+
   return { bot, registry, scheduler: new Scheduler(tasks, taskRunner), updater };
+}
+
+/**
+ * Resume turns a restart cut off. Each session's lock file is the marker: it
+ * survives the process that died mid-turn. The topic that still has the session
+ * in the foreground is where the turn continues.
+ */
+async function resumeInterruptedTurns(
+  cfg: AppConfig,
+  settings: SettingsStore,
+  registry: RuntimeRegistry,
+): Promise<void> {
+  const slog = new SessionLog(cfg.sessionsDir);
+  const ids = slog.interruptedSessions();
+  if (ids.length === 0) return;
+  log.info(`resuming ${ids.length} turn(s) cut off by the restart`);
+  for (const sessionId of ids) {
+    const loc = settings.locationOfSession(sessionId);
+    if (!loc) {
+      log.warn(`interrupted session ${sessionId.slice(0, 8)} has no foreground topic; leaving it`);
+      continue;
+    }
+    try {
+      const controller = loc.threadId
+        ? registry.forumController(loc.chatId, loc.threadId, cfg.workspace)
+        : registry.controller(loc.chatId);
+      const rt = controller.foreground();
+      if (rt.sessionId !== sessionId) {
+        log.warn(`interrupted session ${sessionId.slice(0, 8)} is no longer foreground; skipping`);
+        continue;
+      }
+      await rt.resumeInterrupted();
+    } catch (e) {
+      log.warn(`resume ${sessionId.slice(0, 8)} failed: ${(e as Error).message}`);
+    }
+  }
 }
