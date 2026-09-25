@@ -13,7 +13,7 @@
 import type { Api } from "grammy";
 import { chunkMarkdown } from "../render/chunk.js";
 import { toTelegramMarkdown } from "../render/markdown.js";
-import { renderProcessBlock, PROCESS_DONE_SUMMARY } from "../render/process-block.js";
+import { renderProcessBlock, workedForSummary } from "../render/process-block.js";
 import { stripProgressMarkers } from "../render/progress.js";
 import { stripTelegramActionFences } from "../render/telegram-bridge.js";
 import { safeEdit, safeEditRich, safeSend, safeSendRich } from "../bot/telegram-io.js";
@@ -210,25 +210,16 @@ export class ResponseStreamer {
   }
 
   /**
-   * Hermes `all` + `accumulate`: append one tool-start line. The same line
-   * twice in a row becomes `line (×N)`. Lines stack with a single newline.
+   * One fold per tool, keyed by its call id so the result fills the same fold
+   * once the call completes instead of adding a second line.
    */
-  appendProgressLine(rawMarkdown: string): void {
-    const line = rawMarkdown.replace(/\s+$/g, "");
-    if (!line.trim() || this.proseOnly) return;
-    const last = this.segs.at(-1);
-    if (last?.kind === "tool" && last.toolId === "progress") {
-      const base = last.text.replace(/ \(×\d+\)$/, "");
-      if (base === line) {
-        const times = / \(×(\d+)\)$/.exec(last.text);
-        const n = times ? Number(times[1]) + 1 : 2;
-        last.text = `${line} (×${n})`;
-      } else {
-        this.segs.push({ kind: "tool", text: line, toolId: "progress" });
-      }
-    } else {
-      this.segs.push({ kind: "tool", text: line, toolId: "progress" });
-    }
+  upsertProgress(toolId: string, title: string, result: string, command = ""): void {
+    const text = `\u0000TOOL${JSON.stringify({ title, result, command })}\u0000`;
+    if (!title.trim() || this.proseOnly) return;
+    const key = toolId || title;
+    const found = this.segs.find((s) => s.kind === "tool" && s.toolId === key);
+    if (found) found.text = text;
+    else this.segs.push({ kind: "tool", text, toolId: key });
     this.noteRealContent();
     this.schedule(true);
   }
@@ -354,8 +345,7 @@ export class ResponseStreamer {
     if (!this.proseOnly && this.planMarkdown) parts.push(this.planMarkdown);
     if (parts.length === 0) return;
     const elapsed = Math.max(1, Math.round((Date.now() - (this.processSentAt || Date.now())) / 1000));
-    const usage = tokens && tokens > 0 ? ` · ${tokens.toLocaleString("en-US")} tokens` : "";
-    const block = renderProcessBlock(parts.join("\n\n"), false, `${PROCESS_DONE_SUMMARY} ${elapsed}s${usage}`);
+    const block = renderProcessBlock(parts.join("\n\n"), false, workedForSummary(elapsed, tokens));
     await safeEditRich(this.api, this.chatId, this.liveId, block.html);
   }
 

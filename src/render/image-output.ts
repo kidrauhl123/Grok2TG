@@ -1,12 +1,10 @@
 /**
- * Prompt appendix so the agent keeps generated images in the session media
- * folder and mentions absolute paths (the bot delivers those as Telegram files).
+ * One line appended to the first prompt of a session, telling the agent how to
+ * hand a file to Telegram. The bridge delivers `MEDIA:/absolute/path` and a
+ * bare absolute path that exists; it does not scan directories.
  *
  * Keep tidy-idempotent (no trailing spaces / 3+ blank lines) so
- * `cleanStoredText` can strip it by exact match after extractProgress/tidy.
+ * `cleanStoredText` can strip it by exact match.
  */
-export const IMAGE_OUTPUT_DIRECTIVE = [
-  "IMAGE OUTPUT RULES:",
-  "When generating images (image_gen / image_edit) or saving image files, write them under the current Grok session media folder (session images/ or assets/) or the project images/ directory — not random temp locations.",
-  "Always mention the absolute path of each image file you create in your reply so the client can deliver it as a downloadable Telegram file.",
-].join("\n");
+export const IMAGE_OUTPUT_DIRECTIVE =
+  "You can send files natively: write MEDIA:/absolute/path/to/file in your response. Images (.png, .jpg, .webp) are delivered as files.";

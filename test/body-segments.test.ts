@@ -65,3 +65,11 @@ test("blank body segments are dropped", () => {
   assert.deepEqual(split.process, []);
   assert.equal(split.answer, "答案。");
 });
+
+test("a panel recorded as the only body is the answer", () => {
+  const split = splitBodySegments([
+    { kind: "body", text: "Memory\n• memory/MEMORY.md (global, 0.2 KB)\nmemory on · capture on · dream on" },
+  ]);
+  assert.deepEqual(split.process, []);
+  assert.ok(split.answer.startsWith("Memory"));
+});

@@ -13,6 +13,7 @@ import {
   extractPath,
   extractSearchQuery,
   extractUrl,
+  extractToolOutput,
   resolveToolIdentity,
 } from "./tool-call-detail.js";
 
@@ -20,9 +21,12 @@ import {
 export const TOOL_PREVIEW_LENGTH = 300;
 
 export interface ToolProgressLine {
-  text: string;
-  /** A fenced terminal block. The next terminal call drops its header. */
-  terminal: boolean;
+  /** The one line that titles the fold, such as `📖 Reading config.json`. */
+  title: string;
+  /** The tool's result, shown inside the fold. Empty until it arrives. */
+  result: string;
+  /** A terminal call's command, shown as its own code block. */
+  command?: string;
 }
 
 function flattenRaw(u: SessionUpdate): Record<string, unknown> {
@@ -71,74 +75,72 @@ function plain(emoji: string, name: string, preview: string): string {
   return `> ${line}`;
 }
 
-function terminalBlock(command: string, dropHeader: boolean): string {
-  const raw = command.replace(/\s+$/g, "").trim();
-  const header = dropHeader ? "" : "💻 terminal\n";
-  return `${header}\n\n\u0000CODE${raw}\u0000\n\n`;
+/** A command's output, cut the way Hermes cuts it: head 40%, tail 60%, and only
+ *  once it passes 50,000 characters. Shorter output is kept whole. */
+const OUTPUT_CAP = 50_000;
+
+function cutOutput(text: string): string {
+  const clean = text.replace(/\s+$/g, "").trim();
+  if (clean.length <= OUTPUT_CAP) return clean;
+  const head = Math.floor(OUTPUT_CAP * 0.4);
+  const tail = OUTPUT_CAP - head;
+  const omitted = clean.length - head - tail;
+  const notice = `\n\n... [OUTPUT TRUNCATED - ${omitted.toLocaleString("en-US")} chars omitted out of ${clean.length.toLocaleString("en-US")} total] ...\n\n`;
+  return clean.slice(0, head) + notice + clean.slice(-tail);
 }
 
 /**
- * One Hermes "all" progress line for a tool that has just started.
- * `dropTerminalHeader` is true when the previous line was also a terminal block.
+ * One fold per tool. `title` is the summary line; `result` is what the tool
+ * returned, filled in once the call completes.
  */
-export function formatToolProgressAll(
-  update: SessionUpdate,
-  opts?: { dropTerminalHeader?: boolean },
-): ToolProgressLine | undefined {
+export function formatToolProgressAll(update: SessionUpdate): ToolProgressLine | undefined {
   const raw = flattenRaw(update);
   const id = resolveToolIdentity(update, raw);
   const name = named(id);
 
   if (id.kind === "execute") {
-    const command = extractCommand(raw);
-    if (!command.trim()) return { text: "> 💻 terminal...", terminal: false };
-    return { text: terminalBlock(command, !!opts?.dropTerminalHeader), terminal: true };
+    const command = extractCommand(raw).replace(/\s+$/g, "").trim();
+    const first = command.split(/\r?\n/)[0] ?? "";
+    return { title: "💻 terminal", command, result: cutOutput(extractToolOutput(update)) };
   }
 
+  const result = cutOutput(extractToolOutput(update));
   if (id.kind === "read") {
     const label = fileLabel(raw);
-    return { text: label ? `> 📖 Reading ${label}` : "> 📖 Reading...", terminal: false };
+    return { title: label ? `📖 Reading ${label}` : "📖 Reading", result };
   }
   if (id.kind === "search") {
     const query = clip(extractSearchQuery(raw));
-    return {
-      text: query ? `> 🔎 Searching files for ${query}` : "> 🔎 Searching files...",
-      terminal: false,
-    };
+    return { title: query ? `🔎 Searching files for ${query}` : "🔎 Searching files", result };
   }
   if (id.kind === "web_search") {
     const query = clip(extractSearchQuery(raw) || String(raw.query ?? ""));
-    return {
-      text: query ? `> 🔍 Searching the web for ${query}` : "> 🔍 Searching the web...",
-      terminal: false,
-    };
+    return { title: query ? `🔍 Searching the web for ${query}` : "🔍 Searching the web", result };
   }
   if (id.kind === "edit") {
     const label = fileLabel(raw);
-    return { text: label ? `> 🔧 Editing ${label}` : "> 🔧 Editing...", terminal: false };
+    return { title: label ? `🔧 Editing ${label}` : "🔧 Editing", result };
   }
   if (id.kind === "write" || id.kind === "create") {
     const label = fileLabel(raw);
-    return { text: label ? `> ✍️ Writing ${label}` : "> ✍️ Writing...", terminal: false };
+    return { title: label ? `✍️ Writing ${label}` : "✍️ Writing", result };
   }
   if (id.kind === "fetch" || id.kind === "web_fetch") {
     const url = clip(extractUrl(raw) || extractPath(raw));
-    return { text: url ? `> 📄 Reading ${url}` : "> 📄 Reading...", terminal: false };
+    return { title: url ? `📄 Reading ${url}` : "📄 Reading", result };
   }
   if (id.kind === "image") {
     const prompt = clip(String(raw.prompt ?? raw.query ?? ""));
-    return { text: prompt ? `> 🖼️ Generating image ${prompt}` : "> 🖼️ Generating image...", terminal: false };
+    return { title: prompt ? `🖼️ Generating image ${prompt}` : "🖼️ Generating image", result };
   }
   if (id.kind === "todo") {
-    return { text: "> ✅ Updating tasks", terminal: false };
+    return { title: "✅ Updating tasks", result };
   }
   if (id.kind === "delete") {
     const label = fileLabel(raw);
-    return { text: label ? plain("🗑️", "delete", label) : "🗑️ delete...", terminal: false };
+    return { title: label ? `🗑️ delete ${label}` : "🗑️ delete", result };
   }
 
-  const preview = clip(
-    extractSearchQuery(raw) || extractPath(raw) || extractCommand(raw) || extractUrl(raw),
-  );
-  return { text: plain("⚙️", name, preview), terminal: false };
+  const preview = clip(extractSearchQuery(raw) || extractPath(raw) || extractCommand(raw) || extractUrl(raw));
+  return { title: preview ? `⚙️ ${name}: "${preview}"` : `⚙️ ${name}`, result };
 }

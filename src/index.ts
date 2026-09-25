@@ -19,7 +19,7 @@ import { GrokPool } from "./grok/pool.js";
 import { createBot } from "./bot/bot.js";
 import { CANONICAL_DIR, loadConfig } from "./config.js";
 import { InstanceLock } from "./app/instance-lock.js";
-import { coldBootQueueLog, dropPendingOnStart } from "./app/cold-boot-queue.js";
+import { coldBootQueueLog, dropPendingOnStart, KEEP_QUEUE_FLAG } from "./app/cold-boot-queue.js";
 import {
   isIntentionalShutdown,
   markIntentionalShutdown,

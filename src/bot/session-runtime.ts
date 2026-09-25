@@ -23,6 +23,7 @@ import { type PromptInput, type ReasoningEffort, textPrompt } from "../app/types
 import { createLogger } from "../logger.js";
 import { buildTranscript, readHistory } from "../sessions/history.js";
 
+import { formatElapsed } from "../render/process-block.js";
 import { BODY_FORMAT_MARKER, bodyFormatDirective } from "../render/body-format.js";
 import { splitBodySegments } from "../render/body-segments.js";
 import { extractProgress, PROGRESS_DIRECTIVE, stripProgressMarkers } from "../render/progress.js";
@@ -271,8 +272,6 @@ export class SessionRuntime {
   private stagedReportBack: ReportBackMeta | undefined;
   /** Last credits total reported for this session (for per-turn delta accounting). */
   private lastReportedCredits = 0;
-  /** Last token total reported for this session, so the title shows this turn only. */
-  private lastReportedTokens = 0;
   /** Live "what is happening now" line while a turn is in flight (tools/plan). */
   private liveStep: string | undefined;
   /**
@@ -738,7 +737,6 @@ export class SessionRuntime {
     this.projectName = projectName;
     this.turnCount = 0;
     this.lastReportedCredits = 0;
-    this.lastReportedTokens = 0;
     this.liveStep = undefined;
     this.sessionComment = undefined;
     this.cardUserPrompt = undefined;
@@ -1346,7 +1344,7 @@ export class SessionRuntime {
       const streamedOutput = this.streamer?.hasOutput ?? false;
       if (this.streamer) await this.streamer.finalize();
       await this.publishFinishedAnswer();
-      await this.streamer?.collapse(this.turnTokenDelta());
+      await this.collapseProcess();
       if (this.foreground) await this.sendTurnImages();
 
       // Telegram bridge actions (JSON fences in the agent reply). Process on
@@ -1617,7 +1615,7 @@ export class SessionRuntime {
       // Unexpected failure outside the prompt path (e.g. while finalizing).
       await this.streamer?.finalize().catch(() => {});
       await this.publishFinishedAnswer().catch(() => {});
-      await this.streamer?.collapse(this.turnTokenDelta()).catch(() => {});
+      await this.collapseProcess().catch(() => {});
       const errMsg = (err as Error).message;
       this.persistCardUserPrompt();
       this.cardThinking = "";
@@ -2272,13 +2270,10 @@ export class SessionRuntime {
     return s.text;
   }
 
-  /** Tokens spent since the previous turn, or undefined when Grok did not report any. */
-  private turnTokenDelta(): number | undefined {
-    const total = this.contextInfo()?.totalTokens;
-    if (typeof total !== "number" || !Number.isFinite(total)) return undefined;
-    const delta = total - this.lastReportedTokens;
-    this.lastReportedTokens = total;
-    return delta > 0 ? delta : undefined;
+  /** Collapse the process bubble, with this turn's billed tokens on the title. */
+  private async collapseProcess(): Promise<void> {
+    const tokens = this.sessionId ? await this.acp.waitForTurnTokens(this.sessionId) : undefined;
+    await this.streamer?.collapse(tokens);
   }
 
   /** Attribute a finished turn's credits/context to the active saved account. */
@@ -2371,12 +2366,11 @@ export class SessionRuntime {
       this.subagentToolCache.set(cacheKey, merged);
       const status = (update.status || "").toLowerCase();
       const subKey = `sub:${cacheKey}`;
-      if (!this.shownToolIds.has(subKey) && snapshotHasDetail(merged)) {
-        const line = formatToolProgressAll(merged, { dropTerminalHeader: this.lastToolWasTerminal });
+      if (snapshotHasDetail(merged)) {
+        const line = formatToolProgressAll(merged);
         if (line) {
-          this.lastToolWasTerminal = line.terminal;
           this.shownToolIds.add(subKey);
-          this.streamer.appendProgressLine(line.text);
+          this.streamer.upsertProgress(subKey, line.title, line.result, line.command);
         }
       }
       const step = stepFromToolUpdate(merged);
@@ -2760,13 +2754,11 @@ export class SessionRuntime {
     return last;
   }
 
-  /** Send any fresh images the agent produced this turn (Imagine, screenshots…). */
+  /** Send images the reply names (`MEDIA:` or a real absolute path). */
   private async sendTurnImages(): Promise<void> {
     if (!this.cfg.sendAgentImages) return;
-    // Always check session images/ + assets/ even when the agent never named a
-    // path in text — image_gen writes under ~/.grok/sessions/.../images/.
     const paths = collectTurnImagePaths({
-      scanText: this.imageScanText,
+      scanText: this.turnAssistantText,
       cwd: this.cwd,
       sessionId: this.sessionId,
       since: this.turnStartedAt,
@@ -2774,7 +2766,6 @@ export class SessionRuntime {
     if (paths.length === 0) return;
     try {
       const n = await sendImages(this.api, this.chatId, paths, {
-        since: this.turnStartedAt,
         already: this.sentImagesThisTurn,
         max: this.cfg.agentImagesMax,
         replyTo: this.turnReplyTo,
@@ -3148,14 +3139,13 @@ export class SessionRuntime {
       const id = update.toolCallId || "";
       const merged = (id && this.toolCallCache.get(id)) || mergeToolSnapshot(undefined, update);
 
-      // Hermes "all": one line when the call starts. Later output does not rewrite it.
+      // One fold per tool. The result fills the same fold when the call completes.
       const key = id || `tool_call:${merged.title ?? merged.name ?? ""}`;
-      if (!this.shownToolIds.has(key) && snapshotHasDetail(merged)) {
-        const line = formatToolProgressAll(merged, { dropTerminalHeader: this.lastToolWasTerminal });
+      if (snapshotHasDetail(merged)) {
+        const line = formatToolProgressAll(merged);
         if (line) {
-          this.lastToolWasTerminal = line.terminal;
           this.shownToolIds.add(key);
-          this.streamer.appendProgressLine(line.text);
+          this.streamer.upsertProgress(key, line.title, line.result, line.command);
         }
       }
     }
@@ -3213,11 +3203,16 @@ export class SessionRuntime {
     }
   }
 
-  /** Remember answer text that did not arrive as an agent_message_chunk. */
+  /** Remember answer text that did not arrive as an agent_message_chunk.
+   *  The finished answer is built from turnParts, not from this string, so a
+   *  panel such as /memory has to be a body part or it is never sent. */
   private noteAnswerText(text: string | undefined): void {
     const next = text?.trim();
     if (!next || this.turnAssistantText.includes(next)) return;
     this.turnAssistantText += (this.turnAssistantText ? "\n\n" : "") + next;
+    const last = this.turnParts.at(-1);
+    if (last?.kind === "body") last.text += (last.text ? "\n\n" : "") + next;
+    else this.turnParts.push({ kind: "body", text: next });
   }
 
   /**
@@ -3366,13 +3361,9 @@ export function pickManagerFallbackText(cleaned: string): string | undefined {
   return out;
 }
 
-/** Format an elapsed duration compactly (e.g. "8s", "2m 13s", "1h 4m"). */
+/** Format an elapsed duration compactly (e.g. "8s", "2m 13s", "1h 4m", "1d 2h"). */
 function fmtDuration(ms: number): string {
-  const s = Math.round(ms / 1000);
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ${s % 60}s`;
-  return `${Math.floor(m / 60)}h ${m % 60}m`;
+  return formatElapsed(ms / 1000);
 }
 
 /** Format a credits/cost figure compactly (drops noise decimals). */

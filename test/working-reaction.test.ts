@@ -3,7 +3,7 @@ import test from "node:test";
 import { pickWorkingReaction, reactionPayload, WORKING_REACTIONS } from "../src/render/working-reaction.ts";
 
 test("the pool stays inside the allowed set and drops the negative ones", () => {
-  for (const emoji of ["👎", "😱", "🤬", "😢", "🤮", "💩", "🤡", "🖕", "😭", "😡"]) {
+  for (const emoji of ["👎", "😱", "🤬", "😢", "🤮", "💩", "🤡", "🖕", "😭", "😡", "🥴", "🌚", "👻", "🎃", "🗿", "🤪", "🙈", "💊"]) {
     assert.equal((WORKING_REACTIONS as readonly string[]).includes(emoji), false, emoji);
   }
   assert.ok(WORKING_REACTIONS.includes("👍"));

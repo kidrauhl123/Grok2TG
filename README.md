@@ -605,7 +605,7 @@ user. See [SECURITY.md](./SECURITY.md) for the full model.
 - [x] Collapsible process bubble (thinking + tools in one rich-text message)
 - [x] Rich-text final answers for tables, task lists and math (`/rich`)
 - [x] Resume a turn cut off by a bot restart
-- [ ] **Token & cost meter** — blocked: Grok CLI's ACP does not report per-turn token usage, so the bridge cannot count it
+- [x] **Token count on the process title** — `turn_completed.usage.totalTokens` is appended after `Worked for Ns`
 - [ ] **Text-to-speech replies** — optionally speak answers back as voice notes
 - [ ] **Scheduled-task chaining & conditions** — run task B after A, or only if a command/file check passes
 - [ ] **Team mode** — roles and audit log beyond shared `ALLOWED_USERS` + forum topics

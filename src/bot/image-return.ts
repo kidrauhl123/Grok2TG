@@ -22,7 +22,7 @@ const log = createLogger("image-return");
 
 /** Absolute / relative image path tokens in free text (Unix + Windows). */
 const PATH_RE =
-  /(?:[A-Za-z]:[\\/]|\/|~[\\/]|\.{1,2}[\\/])?[^\s"'`<>|()*\[\]{}]+\.(?:png|jpe?g|gif|webp|bmp)/gi;
+  /(?:[A-Za-z]:[\\/]|\/|~[\\/]|\.{1,2}[\\/])?[^\s"'`<>|()*[\]{}]+\.(?:png|jpe?g|gif|webp|bmp)\b/gi;
 const IMAGE_EXT = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp"]);
 const MAX_FILE_BYTES = 45 * 1024 * 1024;
 
@@ -34,17 +34,32 @@ function isInside(path: string, dir: string): boolean {
   return file === root || file.startsWith(root + "/");
 }
 
-/** Pull candidate image paths out of arbitrary text, resolved against cwd. */
+/** Pull the image paths a reply asks to deliver.
+ * `MEDIA:` tags are explicit. A bare absolute path counts only when the file
+ * exists, so a guessed path is never sent. Both patterns are anchored to an
+ * absolute path, so an inlined base64 image — one long word with no path —
+ * never matches. */
 export function extractImagePaths(text: string, cwd: string): string[] {
-  const out = new Set<string>();
-  for (const m of text.matchAll(PATH_RE)) {
-    let raw = m[0].replace(/[).,;:]+$/, "");
-    if (raw.startsWith("~/") || raw.startsWith("~\\")) {
-      raw = join(homedir(), raw.slice(2));
-    }
-    out.add(isAbsolute(raw) ? raw : join(cwd, raw));
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const add = (raw: string) => {
+    let path = raw.replace(/[).,;:]+$/, "");
+    if (path.startsWith("~/") || path.startsWith("~\\")) path = join(homedir(), path.slice(2));
+    else if (!isAbsolute(path)) path = join(cwd, path);
+    if (seen.has(path)) return;
+    seen.add(path);
+    out.push(path);
+  };
+
+  const mediaRe = /MEDIA:\s*((?:[A-Za-z]:[/\\]|\/|~\/)\S+?\.(?:png|jpe?g|gif|webp|bmp))\b/gi;
+  for (const m of text.matchAll(mediaRe)) add(m[1]!);
+
+  const bareRe = /(?<![/:\w.])((?:~\/|\/|[A-Za-z]:[/\\])[\w./\\%-]+\.(?:png|jpe?g|gif|webp|bmp))\b/gi;
+  for (const m of text.matchAll(bareRe)) {
+    const path = m[1]!.startsWith("~") ? join(homedir(), m[1]!.slice(2)) : m[1]!;
+    if (existsSync(path)) add(path);
   }
-  return [...out];
+  return out;
 }
 
 /**
@@ -101,42 +116,18 @@ export function listFreshImagesInDir(dir: string, since: number): string[] {
   });
 }
 
-/** Collect all image candidates for a turn from text + known asset locations. */
+/** Images the reply asks to send: a `MEDIA:` tag, or a bare absolute path that exists. */
 export function collectTurnImagePaths(opts: {
   scanText: string;
   cwd: string;
   sessionId?: string;
   since: number;
 }): string[] {
-  const seen = new Set<string>();
-  const out: string[] = [];
-  const add = (paths: string[]) => {
-    for (const p of paths) {
-      if (seen.has(p)) continue;
-      seen.add(p);
-      out.push(p);
-    }
-  };
-
-  add(extractImagePaths(opts.scanText, opts.cwd));
-  add(listFreshImagesInDir(join(opts.cwd, "images"), opts.since));
-  if (opts.sessionId) {
-    // Only the session `images/` folder. `assets/` is where Grok stores the
-    // user's own uploaded photos, and the model echoes that path back — sending
-    // it would hand the user their own picture again.
-    add(listFreshImagesInDir(join(grokSessionMediaRoot(opts.cwd, opts.sessionId), "images"), opts.since));
-  }
-  // A path the model names explicitly is still sent, unless it points at the
-  // user's own upload in the session assets folder.
-  const assetsDir = opts.sessionId
-    ? grokSessionAssetsDir(opts.cwd, opts.sessionId)
-    : undefined;
-  return out.filter((p) => !assetsDir || !isInside(p, assetsDir));
+  const assetsDir = opts.sessionId ? grokSessionAssetsDir(opts.cwd, opts.sessionId) : undefined;
+  return extractImagePaths(opts.scanText, opts.cwd).filter((p) => !assetsDir || !isInside(p, assetsDir));
 }
 
 export interface SendImagesOptions {
-  /** Only send files modified at/after this epoch ms (fresh this turn). */
-  since: number;
   /** Paths already sent (mutated to dedupe). */
   already: Set<string>;
   /** Max images to send in this call. */
@@ -173,7 +164,6 @@ export async function sendImages(
       continue;
     }
     if (!st.isFile() || st.size === 0 || st.size > MAX_FILE_BYTES) continue;
-    if (st.mtimeMs < opts.since - 2000) continue; // skip pre-existing files
     opts.already.add(path);
     try {
       // Always send as a document so Telegram delivers a downloadable file

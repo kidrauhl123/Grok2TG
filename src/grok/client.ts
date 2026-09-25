@@ -19,6 +19,7 @@ import { stripBodyFormatDirective } from "../render/body-format.js";
 import { IMAGE_OUTPUT_DIRECTIVE } from "../render/image-output.js";
 import { SessionLog } from "./session-log.js";
 import { JsonRpcTransport } from "./transport.js";
+import { turnTokensFromPromptResult, turnTokensFromUpdate } from "./turn-usage.js";
 import {
   contentText,
   type ContentBlock,
@@ -246,12 +247,14 @@ export declare interface GrokClient {
   on(e: "restarted", l: () => void): this;
   on(e: "subagents", l: (subagents: SubagentInfo[], pending: PendingStage[]) => void): this;
   on(e: "plan-exit", l: (sessionId: string | undefined, result: unknown) => void): this;
+  on(e: "turn-usage", l: (sessionId: string, totalTokens: number) => void): this;
   emit(e: "session-update", sessionId: string, update: SessionUpdate): boolean;
   emit(e: "notification", method: string, params: unknown): boolean;
   emit(e: "exit", code: number | null): boolean;
   emit(e: "restarted"): boolean;
   emit(e: "subagents", subagents: SubagentInfo[], pending: PendingStage[]): boolean;
   emit(e: "plan-exit", sessionId: string | undefined, result: unknown): boolean;
+  emit(e: "turn-usage", sessionId: string, totalTokens: number): boolean;
 }
 
 export class GrokClient extends EventEmitter {
@@ -289,6 +292,8 @@ export class GrokClient extends EventEmitter {
   availableModels: Array<{ modelId: string; name: string; description?: string }> = [];
   currentModelId?: string;
   private readonly metadata = new Map<string, SessionMetadata>();
+  /** This prompt's billed total (input + output), from `turn_completed`. */
+  private readonly turnTokens = new Map<string, number>();
   private subagents: SubagentInfo[] = [];
   private pendingStages: PendingStage[] = [];
   permissionHandler?: (params: RequestPermissionParams) => Promise<PermissionOutcome>;
@@ -502,6 +507,7 @@ export class GrokClient extends EventEmitter {
         reject(e);
       };
       this.lastActivity.set(sessionId, start);
+      this.turnTokens.delete(sessionId);
       this.running.add(sessionId);
       this.promptReqBySession.set(sessionId, id);
       if (this.proc?.pid) this.slog.lock(sessionId, this.proc.pid);
@@ -771,6 +777,31 @@ export class GrokClient extends EventEmitter {
     return sessionId ? this.metadata.get(sessionId) : undefined;
   }
 
+  /**
+   * Billed tokens for the prompt in flight. Already known when `turn_completed`
+   * landed before the RPC result; otherwise waits briefly for that notification.
+   */
+  waitForTurnTokens(sessionId: string, timeoutMs = 1_000): Promise<number | undefined> {
+    const ready = this.turnTokens.get(sessionId);
+    if (ready) return Promise.resolve(ready);
+    return new Promise((resolve) => {
+      const onUsage = (sid: string, tokens: number) => {
+        if (sid !== sessionId) return;
+        cleanup();
+        resolve(tokens);
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        resolve(this.turnTokens.get(sessionId));
+      }, timeoutMs);
+      const cleanup = () => {
+        clearTimeout(timer);
+        this.off("turn-usage", onUsage);
+      };
+      this.on("turn-usage", onUsage);
+    });
+  }
+
   currentSubagents(): SubagentInfo[] {
     return this.subagents.slice();
   }
@@ -820,7 +851,13 @@ export class GrokClient extends EventEmitter {
       // pending still needs delete here. Double-delete is a no-op on Map.
       this.pending.delete(msg.id);
       if (msg.error) p.reject(this.toGrokError(msg.error, p.method));
-      else p.resolve(msg.result);
+      else {
+        if (p.method === "session/prompt" && p.sessionId) {
+          const spent = turnTokensFromPromptResult(msg.result);
+          if (spent) this.noteTurnTokens(p.sessionId, spent);
+        }
+        p.resolve(msg.result);
+      }
       return;
     }
     // Request from the agent (has both id and method) — needs a response.
@@ -903,9 +940,12 @@ export class GrokClient extends EventEmitter {
       this.lastActivityAny = Date.now();
     }
     if (method === "session/update" || method === "_x.ai/session/update") {
-      const p = params as SessionNotificationParams;
+      const p = params as SessionNotificationParams & { _meta?: { totalTokens?: number } };
       if (p?.sessionId && p.update) {
         this.lastActivity.set(p.sessionId, Date.now());
+        const spent = turnTokensFromUpdate(p.update);
+        if (spent) this.noteTurnTokens(p.sessionId, spent);
+        else if (typeof p._meta?.totalTokens === "number") this.noteContextTokens(p.sessionId, p._meta.totalTokens);
         this.recordUpdate(p.sessionId, p.update);
         this.emit("session-update", p.sessionId, p.update);
         return;
@@ -958,17 +998,29 @@ export class GrokClient extends EventEmitter {
         this.slog.logTool(sessionId, String(name), detail ? String(detail).slice(0, 200) : "");
       }
     }
-    // Derive a context-usage %/token count if the update carries usage info.
+    // A non-turn usage total is context occupancy. `turn_completed` spend is
+    // stored separately and must not be treated as how full the window is.
+    if (u.sessionUpdate === "turn_completed") return;
     const usage = (u as { usage?: { totalTokens?: number } }).usage;
-    if (usage?.totalTokens) {
-      const prev = this.metadata.get(sessionId) ?? {};
-      const win = contextWindowFor(this.currentModelId);
-      this.metadata.set(sessionId, {
-        ...prev,
-        totalTokens: usage.totalTokens,
-        contextUsagePercentage: Math.min(100, Math.round((usage.totalTokens / win) * 100)),
-      });
-    }
+    if (typeof usage?.totalTokens === "number") this.noteContextTokens(sessionId, usage.totalTokens);
+  }
+
+  /** This turn's billed total. Later reports for the same prompt replace it. */
+  private noteTurnTokens(sessionId: string, tokens: number): void {
+    this.turnTokens.set(sessionId, tokens);
+    this.emit("turn-usage", sessionId, tokens);
+  }
+
+  /** Live context-window occupancy (`_meta.totalTokens`), not spend. */
+  private noteContextTokens(sessionId: string, tokens: number): void {
+    if (!Number.isFinite(tokens) || tokens <= 0) return;
+    const prev = this.metadata.get(sessionId) ?? {};
+    const win = contextWindowFor(this.currentModelId);
+    this.metadata.set(sessionId, {
+      ...prev,
+      totalTokens: Math.round(tokens),
+      contextUsagePercentage: Math.min(100, Math.round((tokens / win) * 100)),
+    });
   }
 
   private failAllPending(err: Error): void {
