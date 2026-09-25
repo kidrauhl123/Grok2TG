@@ -19,6 +19,7 @@ import { textPrompt } from "../../app/types.js";
 import { createLogger } from "../../logger.js";
 import {
   batchKey,
+  FORUM_GENERAL_THREAD_ID,
   forumThreadId,
   isGeneralThread,
   outboundMessageThreadId,
@@ -70,7 +71,15 @@ export function registerMessages(bot: Bot, deps: BotDeps): void {
     const chatId = ctx.chat.id;
     const id = ctx.message.message_id;
     const rawThreadId = ctx.message.message_thread_id;
-    const isForum = Boolean(deps.forum?.isActiveForumChat(chatId));
+    // A supergroup message that carries a topic id is a forum. Remember the
+    // group so every later message is split per topic, even with no
+    // TOPIC_GROUP_ID configured.
+    if (rawThreadId !== undefined && ctx.chat.type === "supergroup" && !deps.forum?.isActiveForumChat(chatId)) {
+      if (deps.forumGroups.add(chatId)) {
+        log.info(`adopted forum group ${chatId}`);
+      }
+    }
+    const isForum = Boolean(deps.forum?.isActiveForumChat(chatId)) || deps.forumGroups.has(chatId);
     const threadId = isForum ? forumThreadId(rawThreadId) : rawThreadId;
     const quoted = extractReplyContext(ctx);
     const replyToMessageId = ctx.message.reply_to_message?.message_id;
@@ -137,12 +146,18 @@ async function flush(deps: BotDeps, batches: Map<string, TextBatch>, key: string
     return;
   }
 
-  const isForum = Boolean(deps.forum?.isActiveForumChat(chatId));
+  const isForum = Boolean(deps.forum?.isActiveForumChat(chatId)) || deps.forumGroups.has(chatId);
   const isGeneral = isForum && isGeneralThread(threadId);
 
   let rt: SessionRuntime = deps.registry.get(chatId);
 
-  if (isForum && deps.forum) {
+  // A group adopted automatically has no ForumManager. Each topic still gets
+  // its own session on the shared workspace; binding a directory comes later.
+  if (isForum && !deps.forum?.isActiveForumChat(chatId)) {
+    const tid = forumThreadId(threadId);
+    const name = tid === FORUM_GENERAL_THREAD_ID ? "General" : `Topic ${tid}`;
+    rt = deps.registry.forumController(chatId, tid, deps.cfg.workspace, name).foreground();
+  } else if (isForum && deps.forum) {
     const resolved = await resolveForumRuntime(
       deps,
       deps.forum,

@@ -6,6 +6,7 @@
  */
 
 import { GROK_FORWARDED_COMMANDS } from "./handlers/grok-slash.js";
+import { loadSkillCommands } from "./skill-commands.js";
 
 /** Bot-local commands (not forwarded to Grok). Order = Telegram "/" menu order. */
 export const BOT_COMMANDS: { command: string; description: string }[] = [
@@ -44,11 +45,21 @@ export const BOT_COMMANDS: { command: string; description: string }[] = [
   { command: "help", description: "Show help" },
 ];
 
-/** Full Telegram menu: bot-local + Grok Build shell forwards (≤100). */
-export const COMMANDS: { command: string; description: string }[] = [
-  ...BOT_COMMANDS,
-  ...GROK_FORWARDED_COMMANDS.map(({ command, description }) => ({ command, description })),
-];
+/** Full Telegram menu: bot-local + Grok builtins + installed skill commands (≤100). */
+export function buildCommands(): { command: string; description: string }[] {
+  const seen = new Set<string>([
+    ...BOT_COMMANDS.map((c) => c.command),
+    ...GROK_FORWARDED_COMMANDS.map((c) => c.command),
+  ]);
+  const skills = loadSkillCommands().filter((c) => !seen.has(c.command));
+  return [
+    ...BOT_COMMANDS,
+    ...GROK_FORWARDED_COMMANDS.map(({ command, description }) => ({ command, description })),
+    ...skills,
+  ].slice(0, 100);
+}
+
+export const COMMANDS: { command: string; description: string }[] = buildCommands();
 
 /**
  * Group / forum command menu — keep short; cancel & menu first so topics can

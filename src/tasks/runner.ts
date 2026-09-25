@@ -4,7 +4,9 @@
  * Runs independently of the user's interactive session.
  */
 import type { Api } from "grammy";
+import { execFile } from "node:child_process";
 import { basename } from "node:path";
+import { promisify } from "node:util";
 import type { GrokPool } from "../grok/pool.js";
 import { contentText, type SessionUpdate } from "../grok/types.js";
 import { createLogger } from "../logger.js";
@@ -12,6 +14,7 @@ import { sendMarkdownDoc } from "../bot/telegram-io.js";
 import type { Task } from "./types.js";
 
 const log = createLogger("task-runner");
+const runCommand = promisify(execFile);
 
 export class TaskRunner {
   constructor(
@@ -21,6 +24,7 @@ export class TaskRunner {
 
   /** Run a task; resolves true on success, false on error. */
   async run(task: Task): Promise<boolean> {
+    if (task.exec) return this.runExec(task);
     log.info(`running task "${task.name}" in ${task.projectPath}`);
     let sessionId = "";
     let text = "";
@@ -65,6 +69,19 @@ export class TaskRunner {
       this.pool.unbind(sessionId);
       await this.deliverError(task, (err as Error).message);
       log.error(`task "${task.name}" failed:`, (err as Error).message);
+      return false;
+    }
+  }
+
+  /** Run a shell command and send nothing. The command posts its own message,
+   *  so a success here stays silent and a failure is only logged. */
+  private async runExec(task: Task): Promise<boolean> {
+    log.info(`running command for "${task.name}"`);
+    try {
+      await runCommand("bash", ["-lc", task.exec!], { timeout: 10 * 60_000 });
+      return true;
+    } catch (err) {
+      log.error(`command for "${task.name}" failed:`, (err as Error).message);
       return false;
     }
   }

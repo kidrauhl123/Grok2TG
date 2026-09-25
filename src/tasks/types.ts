@@ -21,6 +21,9 @@ export interface Task {
   chatId: number;
   name: string;
   prompt: string;
+  /** When set, the task runs this shell command directly and sends nothing.
+   *  The command delivers its own message; the model is not involved. */
+  exec?: string;
   projectPath: string;
   projectName?: string;
   agent?: string;

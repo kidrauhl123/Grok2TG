@@ -16,7 +16,7 @@ import {
 } from "../grok/client.js";
 import type { GrokPool } from "../grok/pool.js";
 import type { AccountRotator } from "./account-rotator.js";
-import { contentText, type ContentBlock, type PromptResult, type SessionUpdate } from "../grok/types.js";
+import { contentText, renderMemoryFiles, type ContentBlock, type PromptResult, type SessionUpdate } from "../grok/types.js";
 import type { AppConfig } from "../config.js";
 import type { SettingsStore } from "../app/settings-store.js";
 import { type PromptInput, type ReasoningEffort, textPrompt } from "../app/types.js";
@@ -2938,6 +2938,12 @@ export class SessionRuntime {
     const kind = update.sessionUpdate;
     if (kind === "auto_compact_completed" || kind === "compaction_checkpoint") {
       this.sawTurnActivity = true;
+    }
+    if (kind === "memory_files") {
+      // A /memory panel returns its file list here and no prose. Show it and
+      // count it, or the turn looks empty and the bridge retries the command.
+      this.sawTurnActivity = true;
+      this.streamer?.appendOutput(renderMemoryFiles(update));
     }
 
     // Quiet meta turns (follow-up suggestions): capture prose only, never stream.

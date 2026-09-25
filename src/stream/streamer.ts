@@ -152,6 +152,13 @@ export class ResponseStreamer {
     return this.footer ? `\n\n${this.footer}` : "";
   }
 
+  /** Footer for a rich message. A leading # is a Markdown heading there, so
+   *  escape it and the line stays small instead of rendering as a title. */
+  private richFooter(): string {
+    if (!this.footer) return "";
+    return `\n\n${this.footer.replace(/(^|\s)#/g, "$1\\#")}`;
+  }
+
   /** Strip telegram action JSON fences and any leftover progress marker. */
   private captureProgress(text: string): string {
     return stripProgressMarkers(stripTelegramActionFences(text));
@@ -350,7 +357,7 @@ export class ResponseStreamer {
       // Markdown. Only when nothing else shares the bubble: a plan board or a
       // liveness line is rendered text, and a rich message cannot be edited.
       if (final && base.trim() && liveSegs.every((s) => s.kind === "out") && !this.planMarkdown && !this.livenessLine) {
-        await sendRichMarkdown(this.api, this.chatId, `${base}${this.footerSuffix()}`, this.replyExtra(true));
+        await sendRichMarkdown(this.api, this.chatId, `${base}${this.richFooter()}`, this.replyExtra(true));
         this.liveId = undefined;
         this.sealedIdx = this.segs.length;
         return;
@@ -432,7 +439,7 @@ export class ResponseStreamer {
     // headings, tables and task lists render as written. Thoughts and tool
     // cards stay on the MarkdownV2 path below.
     if (slice.every((s) => s.kind === "out")) {
-      await sendRichMarkdown(this.api, this.chatId, `${base}${this.footerSuffix()}`, this.replyExtra(true));
+      await sendRichMarkdown(this.api, this.chatId, `${base}${this.richFooter()}`, this.replyExtra(true));
       return;
     }
     // A sealed bubble is finished, so it carries the footer (hashtags). It quotes

@@ -55,6 +55,7 @@ import { PermissionService } from "./permission-service.js";
 import { RuntimeRegistry } from "./registry.js";
 import { TaskWizard } from "./wizard/task-wizard.js";
 import { ForumManager } from "../forum/manager.js";
+import { ForumGroups } from "../forum/groups.js";
 import { TelegramBotService } from "./telegram-bots.js";
 
 const log = createLogger("bot");
@@ -196,6 +197,7 @@ export async function createBot(cfg: AppConfig, pool: GrokPool): Promise<BotBund
     usage: new UsageService(cfg.grokCliPath),
     accounts: new AccountManager(cfg.dataDir),
     forum,
+    forumGroups: new ForumGroups(cfg.dataDir),
   };
 
   // Auto-rotate-on-give-up: let a stuck turn cycle through other saved logins.

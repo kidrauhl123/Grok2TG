@@ -106,7 +106,24 @@ export interface SessionUpdate {
   [k: string]: unknown;
 }
 
-/** A piece of tool-call content (text, diff, etc.). */
+/** Render a Grok /memory panel into text. The panel returns no prose, only a
+ *  memory_files update, so without this the turn looks empty and gets retried. */
+export function renderMemoryFiles(update: SessionUpdate): string {
+  const files = Array.isArray(update.files) ? (update.files as Array<Record<string, unknown>>) : [];
+  const lines = files.map((f) => {
+    const path = String(f.path ?? "");
+    const name = path.split("/").slice(-2).join("/");
+    const kb = Math.round(Number(f.size_bytes ?? 0) / 102.4) / 10;
+    return `• ${name} (${f.source ?? "?"}, ${kb} KB)`;
+  });
+  const flags = [
+    update.enabled === false ? "memory off" : "memory on",
+    update.capture_enabled === false ? "capture off" : "capture on",
+    update.dream_enabled ? "dream on" : "dream off",
+  ];
+  const body = lines.length ? lines.join("\n") : "No memory files.";
+  return `Memory\n${body}\n${flags.join(" · ")}`;
+}
 export interface ToolCallContent {
   type: "content" | "diff" | "terminal" | string;
   path?: string;

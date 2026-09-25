@@ -50,9 +50,11 @@ export function threadIdFromContext(ctx: Context): number | undefined {
 export function resolveScope(ctx: Context, deps: BotDeps): HandlerScope {
   const chatId = ctx.chat!.id;
   const rawThread = threadIdFromContext(ctx);
-  const isForum = Boolean(deps.forum?.isActiveForumChat(chatId));
+  const isForum =
+    Boolean(deps.forum?.isActiveForumChat(chatId)) ||
+    (rawThread !== undefined && deps.forumGroups.has(chatId));
 
-  if (!isForum || !deps.forum) {
+  if (!isForum) {
     const controller = deps.registry.controller(chatId);
     return {
       chatId,
@@ -66,6 +68,25 @@ export function resolveScope(ctx: Context, deps: BotDeps): HandlerScope {
   }
 
   const tid = forumThreadId(rawThread);
+
+  // Adopted automatically: no ForumManager and no directory binding. Each topic
+  // still gets its own session on the shared workspace.
+  if (!deps.forum?.isActiveForumChat(chatId)) {
+    const name = tid === FORUM_GENERAL_THREAD_ID ? "General" : `Topic ${tid}`;
+    const controller = deps.registry.forumController(chatId, tid, deps.cfg.workspace, name);
+    return {
+      chatId,
+      threadId: tid,
+      isForum: true,
+      settingsKey: settingsKeyFor(chatId, tid),
+      controller,
+      rt: controller.foreground(),
+      threadExtra: outboundThreadExtra(tid),
+      projectPath: deps.cfg.workspace,
+      projectName: name,
+    };
+  }
+
   // Ensure General / AI paths are bound before opening menus.
   if (tid === FORUM_GENERAL_THREAD_ID) {
     if (!deps.forum.store.get(tid)?.projectPath) {

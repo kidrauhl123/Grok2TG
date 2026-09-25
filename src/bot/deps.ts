@@ -19,6 +19,7 @@ import type { TaskStore } from "../tasks/store.js";
 import type { StatusPanel } from "./menu/status-panel.js";
 import type { Ephemeral } from "./menu/ephemeral.js";
 import type { ForumManager } from "../forum/manager.js";
+import type { ForumGroups } from "../forum/groups.js";
 import type { RuntimeRegistry } from "./registry.js";
 import type { TaskWizard } from "./wizard/task-wizard.js";
 
@@ -41,6 +42,8 @@ export interface BotDeps {
   accounts: AccountManager;
   /** Present when TOPIC_GROUP_ID is configured. */
   forum?: ForumManager;
+  /** Groups adopted automatically, so they work without TOPIC_GROUP_ID. */
+  forumGroups: ForumGroups;
 }
 
 /** Caches the last project list shown per chat for callback resolution. */
