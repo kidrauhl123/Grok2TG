@@ -54,11 +54,12 @@ test("thinking quotes neutralize triple backticks", () => {
   assert.ok(!/`{3,}ts/.test(md) || md.includes("\\`"), md);
 });
 
-test("thinking quotes collapse and ordinary quotes stay open", () => {
+test("thinking quotes stay open and ordinary quotes stay open", () => {
   const src = "> \u{1F4AD} thinking: first\n> second line\n\n> ordinary quote";
   const md = toTelegramMarkdown(src);
-  assert.ok(md.startsWith(">\u{1F4AD} thinking: first\n**>"));
-  assert.match(md, />second line\|\|/);
+  assert.ok(md.includes(">\u{1F4AD} thinking: first"));
+  assert.ok(md.includes(">second line"));
+  assert.ok(!md.includes("||"));
   assert.ok(md.includes(">ordinary quote"));
   assert.ok(!md.includes("**>ordinary"));
 });

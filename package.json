@@ -50,11 +50,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/artickc/grok-telegram-bot.git"
+    "url": "git+https://github.com/kidrauhl123/Grok2TG.git"
   },
-  "homepage": "https://github.com/artickc/grok-telegram-bot#readme",
+  "homepage": "https://github.com/kidrauhl123/Grok2TG#readme",
   "bugs": {
-    "url": "https://github.com/artickc/grok-telegram-bot/issues"
+    "url": "https://github.com/kidrauhl123/Grok2TG/issues"
   },
   "license": "MIT",
   "dependencies": {

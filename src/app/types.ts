@@ -14,6 +14,12 @@ export interface ChatSettings {
   model?: string;
   reasoning: ReasoningEffort;
   /**
+   * When true, a finished answer that contains a pipe table, task list,
+   * `<details>`, or `$$` block math uses Telegram rich text. Ordinary
+   * replies stay MarkdownV2. Unset means `RICH_MESSAGES` (off).
+   */
+  richMessages?: boolean;
+  /**
    * Preferred saved Grok account login id for this chat/topic (optional).
    * Applied when starting turns if different from the process-active account.
    */

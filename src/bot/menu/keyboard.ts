@@ -11,10 +11,13 @@ import { InlineKeyboard } from "grammy";
 export function mainMenuInline(state: {
   model: string;
   reasoning: string;
+  /** Rich text only for tables, task lists, details, and block math. */
+  rich: boolean;
   /** Forum topic scope — hide project switch; label topic sessions. */
   forumTopic?: { name: string; account?: string };
 }): InlineKeyboard {
   const t = (s: string, n: number): string => (s.length > n ? s.slice(0, n - 1) + "\u2026" : s);
+  const richLabel = state.rich ? "\u{1F4DD} \u6B63\u6587 \u00B7 \u6309\u9700" : "\u{1F4DD} \u6B63\u6587 \u00B7 \u666E\u901A";
   const kb = new InlineKeyboard();
 
   if (state.forumTopic) {
@@ -31,7 +34,7 @@ export function mainMenuInline(state: {
     if (state.forumTopic.account) {
       kb.text(`\u{1F465} Account \u00B7 ${t(state.forumTopic.account, 20)}`, "m:accounts").row();
     }
-    kb.text("\u{1F4CA} Status", "m:status").text("\u2716 Close", "m:close");
+    kb.text(richLabel, "m:rich").row().text("\u{1F4CA} Status", "m:status").text("\u2716 Close", "m:close");
     return kb;
   }
 
@@ -53,6 +56,8 @@ export function mainMenuInline(state: {
     .row()
     .text("\u{1F9E9} MCP", "m:mcp")
     .text("\u{1F6D1} Kill all", "m:killall")
+    .row()
+    .text(richLabel, "m:rich")
     .row()
     .text("\u2716 Close", "m:close");
   return kb;

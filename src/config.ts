@@ -187,6 +187,8 @@ export interface AppConfig {
   messageBatchMs: number;
   showToolCalls: boolean;
   showThinking: boolean;
+  /** Final answer via Telegram rich messages. Off: MarkdownV2, tables become bullets. */
+  richMessages: boolean;
   showEditDiffs: boolean;
   diffMaxLines: number;
   sendAgentImages: boolean;
@@ -356,6 +358,7 @@ export function loadConfig(): AppConfig {
     messageBatchMs: nonNegNum(process.env.MESSAGE_BATCH_MS, 800),
     showToolCalls: bool(process.env.SHOW_TOOL_CALLS, true),
     showThinking: bool(process.env.SHOW_THINKING, true),
+    richMessages: bool(process.env.RICH_MESSAGES, false),
     showEditDiffs: bool(process.env.SHOW_EDIT_DIFFS, true),
     diffMaxLines: num(process.env.DIFF_MAX_LINES, 120),
     sendAgentImages: bool(process.env.SEND_AGENT_IMAGES, true),

@@ -38,6 +38,7 @@ export async function openMainMenu(ctx: Context, deps: BotDeps): Promise<void> {
     reply_markup: mainMenuInline({
       model: scope.rt.model || "default",
       reasoning: reasoningLabel(scope.rt.reasoning),
+      rich: scope.rt.richMessages,
       forumTopic: scope.isForum
         ? { name: scope.projectName ?? "Topic", account: accountLabel }
         : undefined,
@@ -128,6 +129,18 @@ async function dispatchMenu(ctx: Context, deps: BotDeps, action: string): Promis
     case "reasoning":
       await ctx.answerCallbackQuery();
       return showReasoningMenu(ctx, deps);
+    case "rich": {
+      const rt = resolveScope(ctx, deps).rt;
+      rt.setRichMessages(!rt.richMessages);
+      await confirm(
+        ctx,
+        deps,
+        rt.richMessages
+          ? "正文：普通回复仍是 Markdown。表格、任务列表、折叠块、公式才走富文本。"
+          : "正文：普通 Markdown",
+      );
+      return;
+    }
     case "status":
       await ctx.answerCallbackQuery();
       await deps.statusPanel.refresh(chatId);

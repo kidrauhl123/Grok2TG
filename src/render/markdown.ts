@@ -178,9 +178,8 @@ function renderTextBlock(text: string): string {
       bodies.push(next[2] ?? "");
       i += 1;
     }
-    // Tool and thinking quotes keep the first line short and collapse the rest.
-    // The visible line is cut so a long command never fills the chat; the
-    // remainder stays in the expandable quote.
+    // Command and file quotes keep the first line short and collapse the rest.
+    // Thinking stays open: a 20-character stub looks like the turn had no process.
     if (isFoldableQuote(bodies[0] ?? "")) {
       const first = ">" + renderQuoteInline(shortQuote(bodies[0] ?? ""));
       const rest = bodies.slice(1);
@@ -212,7 +211,6 @@ function shortQuote(body: string): string {
 /** First line of a quote that keeps itself visible and folds the rest. */
 function isFoldableQuote(body: string): boolean {
   return (
-    body.startsWith("\u{1F4AD} thinking:") ||
     body.startsWith("\u{1F4BB} command:") ||
     body.startsWith("\u{1F4BB} output:") ||
     body.startsWith("\u{1F4D6} file:")

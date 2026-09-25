@@ -3,6 +3,7 @@
  * Reads only the tail of large logs to stay fast.
  */
 import { closeSync, openSync, readSync, statSync } from "node:fs";
+import { stripBodyFormatDirective } from "../render/body-format.js";
 import { IMAGE_OUTPUT_DIRECTIVE } from "../render/image-output.js";
 import { stripProgressMarkers } from "../render/progress.js";
 import {
@@ -232,7 +233,7 @@ function toEntry(ev: RawEvent): HistoryEntry | undefined {
  *  / fork-priming never surface the raw plumbing. */
 function cleanStoredText(text: string): string {
   if (!text) return text;
-  let t = stripProgressMarkers(text);
+  let t = stripBodyFormatDirective(stripProgressMarkers(text));
   t = extractTelegramActions(t).cleaned;
   if (t.includes(IMAGE_OUTPUT_DIRECTIVE)) t = t.split(IMAGE_OUTPUT_DIRECTIVE).join("").trim();
   // Prefer "User task (continued):" BEFORE plain "User task:" — the continued

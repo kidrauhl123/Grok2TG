@@ -37,6 +37,20 @@ export function registerControl(bot: Bot, deps: BotDeps): void {
     await deps.statusPanel.refresh(ctx.chat.id);
   });
 
+  bot.command("rich", async (ctx) => {
+    const scope = resolveScope(ctx, deps);
+    const arg = ctx.match?.toString().trim().toLowerCase();
+    const next =
+      arg === "on" || arg === "true" ? true : arg === "off" || arg === "false" ? false : !scope.rt.richMessages;
+    scope.rt.setRichMessages(next);
+    await ctx.reply(
+      next
+        ? "正文：普通回复仍是 Markdown。只有表格、任务列表、折叠块、块级公式才走富文本。下一条开始生效。"
+        : "正文改成普通 Markdown 了。表格会拆成条目。下一条开始生效。",
+      scope.threadExtra,
+    );
+  });
+
   bot.command("menu", async (ctx) => {
     await openMainMenu(ctx, deps);
     await deps.statusPanel.refresh(ctx.chat.id);

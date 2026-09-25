@@ -8,6 +8,7 @@
  */
 import { basename } from "node:path";
 import type { SessionUpdate } from "../grok/types.js";
+import { stripBodyFormatDirective } from "./body-format.js";
 import { stripProgressMarkers } from "./progress.js";
 import {
   extractCommand,
@@ -51,7 +52,7 @@ export function cleanCommentLine(raw: string, max = COMMENT_MAX): string {
  * prompts and card previews see the user's real request text.
  */
 export function stripDirectiveWrappers(raw: string): string {
-  let t = raw.trim().replace(/^\([^)]*\)\s*/, "");
+  let t = stripBodyFormatDirective(raw.trim()).replace(/^\([^)]*\)\s*/, "");
   // Manager context + work reports (meta).
   if (/^MANAGER WORK REPORT \(system/i.test(t)) t = "";
   if (/MANAGER CONTEXT \(auto/i.test(t)) {

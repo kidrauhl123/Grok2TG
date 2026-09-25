@@ -5,7 +5,6 @@ import type { Bot } from "grammy";
 import { basename } from "node:path";
 import type { BotDeps } from "../deps.js";
 import { readHistory } from "../../sessions/history.js";
-import { sessionHashtags } from "../../render/hashtags.js";
 import type { SessionMeta } from "../../sessions/types.js";
 import { sendMarkdownDoc } from "../telegram-io.js";
 
@@ -56,8 +55,7 @@ export async function showHistory(
     })
     .join("\n\n");
 
-  // Every AI-output surface carries the session's searchable hashtags. A static
-  // view (no live runtime) tags at least project + session id.
-  const footer = tags ?? sessionHashtags({ cwd: meta?.cwd, sessionId });
-  await sendMarkdownDoc(deps.api, chatId, `${header}\n\n${body}\n\n${footer}`);
+  const footer = tags?.trim();
+  const text = footer ? `${header}\n\n${body}\n\n${footer}` : `${header}\n\n${body}`;
+  await sendMarkdownDoc(deps.api, chatId, text);
 }
