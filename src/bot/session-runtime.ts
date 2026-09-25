@@ -54,7 +54,6 @@ import { LIVENESS_MIN_SILENCE_MS, ResponseStreamer } from "../stream/streamer.js
 import { IMAGE_OUTPUT_DIRECTIVE } from "../render/image-output.js";
 import { collectTurnImagePaths, sendImages } from "./image-return.js";
 import { buildContentBlocks, mergeInputs } from "./prompt-content.js";
-import { wrapAutoComplexityPrompt } from "./complexity-gate.js";
 import {
   autoApproveSuggestions,
   buildSelfRecheckDecisionPrompt,
@@ -85,7 +84,6 @@ import {
 import {
   buildManagerWorkReportPrompt,
   isManagerWorkReportPrompt,
-  wrapManagerDirective,
 } from "../render/manager-directive.js";
 import {
   buildTelegramBridgeDirective,
@@ -859,6 +857,26 @@ export class SessionRuntime {
     return "ran";
   }
 
+  /**
+   * Resume a turn that a restart cut off. The session's lock file is the marker:
+   * it is written when a turn starts and removed when it ends, so one left
+   * behind by a dead process means the model was mid-turn. The restart command
+   * is already in the transcript, so the note tells the model it already ran.
+   */
+  async resumeInterrupted(): Promise<void> {
+    if (!this.sessionId) return;
+    const note =
+      "[system] The previous turn was cut off by a restart before it finished. " +
+      "You are back. Continue from where the transcript stops. " +
+      "The restart already happened — do not run it again.";
+    try {
+      await this.submit(textPrompt(note, undefined, undefined, { skipSelfRecheck: true }));
+      log.info(`resumed interrupted session ${this.sessionId.slice(0, 8)}`);
+    } catch (e) {
+      log.warn(`resume interrupted session failed: ${(e as Error).message}`);
+    }
+  }
+
   private markFirstPromptSteered(): void {
     if (!this.sessionId) return;
     this.complexitySteered.add(this.sessionId);
@@ -876,26 +894,16 @@ export class SessionRuntime {
   }
 
   /**
-   * Complexity + telegram bridge teaching on the first prompt of a brand-new
-   * conversation only (no prior user turns in this process / session jsonl).
-   * Manager mode uses MANAGER_DIRECTIVE instead of complexity/progress coding UX.
+   * Telegram bridge teaching on the first prompt of a brand-new conversation
+   * only (no prior user turns in this process / session jsonl).
    */
   private applyFirstPromptSteering(input: PromptInput): PromptInput {
     // Grok slash commands (/goal …) must stay the first agent text.
     if (input.rawSlashCommand) return input;
     if (!this.shouldSteerFirstPrompt(input)) return input;
-    let toRun: PromptInput;
-    if (this.managerMode) {
-      toRun = wrapManagerDirective(input);
-      toRun = wrapTelegramBridgePrompt(toRun, this.telegramBridgeDirective());
-      this.markFirstPromptSteered();
-      log.info(`chat ${this.chatId}: first-prompt manager + telegram bridge applied`);
-      return toRun;
-    }
-    toRun = wrapAutoComplexityPrompt(input);
-    toRun = wrapTelegramBridgePrompt(toRun, this.telegramBridgeDirective());
+    let toRun = wrapTelegramBridgePrompt(input, this.telegramBridgeDirective());
     this.markFirstPromptSteered();
-    log.info(`chat ${this.chatId}: first-prompt complexity + telegram bridge applied`);
+    log.info(`chat ${this.chatId}: first-prompt telegram bridge applied`);
     return toRun;
   }
 
@@ -1309,7 +1317,8 @@ export class SessionRuntime {
           canPing && (this.foreground || !hasQueued) && !queuedBridgeResults;
         // Manager uses notify/finishManagerUserFacing — never arm Done safety-net spam.
         // Raw slash (/goal) uses normal project Done path when streamed.
-        this.turnExpectDone = pingDone && !(this.managerMode && !rawSlash);
+        this.turnExpectDone =
+          pingDone && !(this.managerMode && !rawSlash) && !streamedOutput;
 
         // One-shot self-recheck: only after a real *user* turn (not meta/auto),
         // with idle queue. skipSelfRecheck blocks loops after recheck / auto-batch.
@@ -1414,10 +1423,14 @@ export class SessionRuntime {
           let doneText = this.isSelfRecheckTurn
               ? this.completionMessageSplit(final.result?.stopReason, startedAt, streamedOutput)
               : this.completionMessage(final.result?.stopReason, startedAt, streamedOutput);
-          // 1) Always send Done FIRST — never block the completion ping on the
-          // quiet suggestions prompt (which can hang and look like "no Done").
+          // The streamed reply is the reply. A separate "✅ Done · Ns / No files
+          // modified" line after it is noise, so it is only sent when nothing was
+          // streamed (tool-only turns) or the turn was stopped/failed — those have
+          // no other message to show the outcome. lastCompletion is still recorded
+          // above for switch-replay and the manager report.
+          const statusOnly = !streamedOutput || this.cancelled || final.result?.stopReason === "cancelled";
           let doneMsgId: number | undefined;
-          const shouldPingDone = pingDone;
+          const shouldPingDone = pingDone && statusOnly;
           if (shouldPingDone && doneText.trim()) {
             doneMsgId = await this.notify(doneText, {
               loud: true,
@@ -1787,6 +1800,15 @@ export class SessionRuntime {
         replyTo: this.turnReplyTo,
       });
     }
+
+    // A turn whose only actions are notifies that all succeeded has nothing left
+    // to do: the user already got the message. Feeding that "ok" back makes the
+    // model answer the receipt with a second "done" message. Anything else
+    // (a query result, a failure, a durable side-effect) still goes back.
+    const needsFollowUp = results.some(
+      (r) => r.action !== "notify" || !r.ok,
+    );
+    if (!needsFollowUp) return false;
 
     // Cap chained result turns so a model that re-emits list_bots forever cannot
     // block Done. Side-effects already ran; user notes were sent above.
