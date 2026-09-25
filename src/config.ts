@@ -186,6 +186,7 @@ export interface AppConfig {
   streamThrottleMs: number;
   messageBatchMs: number;
   showToolCalls: boolean;
+  showThinking: boolean;
   showEditDiffs: boolean;
   diffMaxLines: number;
   sendAgentImages: boolean;
@@ -354,6 +355,7 @@ export function loadConfig(): AppConfig {
     streamThrottleMs: num(process.env.STREAM_THROTTLE_MS, 500),
     messageBatchMs: nonNegNum(process.env.MESSAGE_BATCH_MS, 800),
     showToolCalls: bool(process.env.SHOW_TOOL_CALLS, true),
+    showThinking: bool(process.env.SHOW_THINKING, true),
     showEditDiffs: bool(process.env.SHOW_EDIT_DIFFS, true),
     diffMaxLines: num(process.env.DIFF_MAX_LINES, 120),
     sendAgentImages: bool(process.env.SEND_AGENT_IMAGES, true),

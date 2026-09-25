@@ -3007,6 +3007,7 @@ export class SessionRuntime {
       return;
     }
     if (kind === "agent_thought_chunk") {
+      if (!this.cfg.showThinking) return;
       const text = contentText(update.content);
       if (text) this.streamer.appendThought(text);
       return;
