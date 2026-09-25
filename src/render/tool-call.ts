@@ -102,13 +102,10 @@ export function formatToolCall(u: SessionUpdate, opts: ToolFormatOptions): strin
     }
     let out = label;
     const args = formatArgLines(raw);
-    if (args) out += "\n" + fence(truncateMiddle(args, PREVIEW_MAX)) + "\n";
+    if (args) out += "\n> " + truncateHead(firstLine(args), 20) + "\n";
     const result = extractToolOutput(u);
     if (result) {
-      out +=
-        "\n**Output:**\n" +
-        fence(truncateMiddleLines(result, OUTPUT_PREVIEW_LINES, OUTPUT_PREVIEW_MAX)) +
-        "\n";
+      out += "\n" + outputLine(result) + "\n";
     }
     return out;
   }
@@ -179,9 +176,8 @@ function boldVerbPath(verb: string, path: string | undefined | null, fallback = 
 }
 
 /**
- * First line stays a normal quote; the remaining lines follow unquoted so the
- * markdown renderer collapses only those. A single over-long line is cut,
- * since a collapsed quote cannot shorten one line.
+ * First line stays a short quote; the remaining lines follow unquoted so the
+ * markdown renderer collapses only those.
  */
 function foldableBlock(marker: string, text: string): string {
   const lines = text
@@ -190,9 +186,25 @@ function foldableBlock(marker: string, text: string): string {
     .split("\n")
     .filter((line, i, all) => line.length > 0 || i < all.length - 1);
   const [first = "", ...rest] = lines;
-  const head = `> ${marker}${truncateHead(first, 160)}`;
+  const head = `> ${marker}${truncateHead(first, 20)}`;
   if (rest.length === 0) return head;
   return `${head}\n${rest.join("\n")}`;
+}
+
+/** The first line only. The rest of a command is not shown. */
+function firstLine(text: string): string {
+  const line = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n")[0] ?? "";
+  return line;
+}
+
+/** One short line of file content. The rest is not sent. */
+function fileLine(text: string): string {
+  return "> \u{1F4D6} file: " + truncateHead(firstLine(text.trim()), 20);
+}
+
+/** One short line of tool output. The rest is not sent, so nothing depends on folding. */
+function outputLine(text: string): string {
+  return "> \u{1F4BB} output: " + truncateHead(firstLine(text.trim()), 20);
 }
 
 /** Fence that lengthens itself when the body contains backticks (avoids MD break). */
@@ -237,18 +249,19 @@ function formatExecute(
     out += `\n  tool: \`${toolName}\``;
   }
   if (cmd) {
-    out += "\n" + foldableBlock("\u{1F4BB} command: ", cmd) + "\n";
+    // One short line, judged by the tool type, not by the text's own format.
+    // Nothing after the first line is sent, so a broken quote cannot spill it.
+    out += "\n> \u{1F4BB} command: " + truncateHead(firstLine(cmd), 20) + "\n";
   } else {
     // No command field — one line of args, not the whole dump.
     const args = formatArgLines(raw);
-    if (args) out += "\n" + foldableBlock("\u{1F4BB} command: ", args) + "\n";
+    if (args) out += "\n> \u{1F4BB} command: " + truncateHead(firstLine(args), 20) + "\n";
   }
   // Display: the first lines of output, folded after the first. Full stdout
   // remains in the agent session / merged tool snapshot.
   const result = extractToolOutput(u);
   if (result) {
-    const live = truncateMiddleLines(result, OUTPUT_PREVIEW_LINES, OUTPUT_PREVIEW_MAX);
-    out += "\n**Output:**\n" + foldableBlock("\u{1F4BB} output: ", live) + "\n";
+    out += "\n" + outputLine(result) + "\n";
   }
   return out;
 }
@@ -279,13 +292,7 @@ function formatWrite(u: SessionUpdate, kind: string, raw: Record<string, unknown
   let out = "\u{1F4DD} " + boldVerbPath(verb, path) + tail;
   const content = extractContent(raw) || extractToolOutput(u);
   if (content) {
-    out +=
-      "\n" +
-      foldableBlock(
-        "\u{1F4D6} file: ",
-        truncateMiddleLines(content, OUTPUT_PREVIEW_LINES, CONTENT_PREVIEW_MAX),
-      ) +
-      "\n";
+    out += "\n" + fileLine(content) + "\n";
   }
   return out;
 }
@@ -314,13 +321,7 @@ function formatRead(
   }
   const body = extractToolOutput(u);
   if (body) {
-    out +=
-      "\n" +
-      foldableBlock(
-        "\u{1F4D6} file: ",
-        truncateMiddleLines(body, OUTPUT_PREVIEW_LINES, OUTPUT_PREVIEW_MAX),
-      ) +
-      "\n";
+    out += "\n" + fileLine(body) + "\n";
   }
   return out;
 }
@@ -344,13 +345,7 @@ function formatList(
   if (filters.exclude) out += "\n  exclude: `" + filters.exclude.replace(/`/g, "'") + "`";
   const body = extractToolOutput(u);
   if (body) {
-    out +=
-      "\n" +
-      foldableBlock(
-        "\u{1F4BB} output: ",
-        truncateMiddleLines(body, OUTPUT_PREVIEW_LINES, OUTPUT_PREVIEW_MAX),
-      ) +
-      "\n";
+    out += "\n" + outputLine(body) + "\n";
   }
   return out;
 }
@@ -382,13 +377,7 @@ function formatSearch(
   if (raw.type) out += "\n  type: " + String(raw.type);
   const hits = extractToolOutput(u);
   if (hits) {
-    out +=
-      "\n" +
-      foldableBlock(
-        "\u{1F4BB} output: ",
-        truncateMiddleLines(hits, OUTPUT_PREVIEW_LINES, OUTPUT_PREVIEW_MAX),
-      ) +
-      "\n";
+    out += "\n" + outputLine(hits) + "\n";
   }
   return out;
 }
@@ -433,13 +422,7 @@ function formatFetch(u: SessionUpdate, raw: Record<string, unknown>, tail: strin
   if (body) out += "\n  body: " + truncate(body, 200);
   const result = extractToolOutput(u);
   if (result) {
-    out +=
-      "\n" +
-      foldableBlock(
-        "\u{1F4BB} output: ",
-        truncateMiddleLines(result, OUTPUT_PREVIEW_LINES, OUTPUT_PREVIEW_MAX),
-      ) +
-      "\n";
+    out += "\n" + outputLine(result) + "\n";
   }
   return out;
 }
@@ -452,13 +435,7 @@ function formatWebSearch(u: SessionUpdate, raw: Record<string, unknown>, tail: s
   if (count) out += "\n  results: " + count;
   const result = extractToolOutput(u);
   if (result) {
-    out +=
-      "\n" +
-      foldableBlock(
-        "\u{1F4BB} output: ",
-        truncateMiddleLines(result, OUTPUT_PREVIEW_LINES, OUTPUT_PREVIEW_MAX),
-      ) +
-      "\n";
+    out += "\n" + outputLine(result) + "\n";
   }
   return out;
 }
@@ -467,7 +444,7 @@ function formatTodo(raw: Record<string, unknown>, tail: string, toolName: string
   let out = "\u2705 **Todos**" + tail;
   if (toolName) out += `\n  tool: \`${toolName}\``;
   const args = formatArgLines(raw);
-  if (args) out += "\n" + fence(truncateMiddle(args, PREVIEW_MAX)) + "\n";
+  if (args) out += "\n> " + truncateHead(firstLine(args), 20) + "\n";
   return out;
 }
 
@@ -488,7 +465,7 @@ function formatThink(
   let out = "\u{1F4AD} **Delegate / think**" + tail + "\n  " + truncate(desc, 300);
   if (toolName) out += `\n  tool: \`${toolName}\``;
   const args = formatArgLines(raw);
-  if (args) out += "\n" + fence(truncateMiddle(args, PREVIEW_MAX)) + "\n";
+  if (args) out += "\n> " + truncateHead(firstLine(args), 20) + "\n";
   return out;
 }
 
@@ -530,9 +507,9 @@ function formatPlanModeTool(
   if (variant) out += `\n  variant: \`${String(raw.variant ?? raw.action)}\``;
   const result = extractToolOutput(u);
   if (result) {
-    // Prefer a short, visible failure/success reason over a huge dump.
-    const short = truncateMiddle(result.trim(), 500);
-    out += "\n" + fence(short) + "\n";
+    // One line, the reason itself. Not cut to the tool-preview budget, or the
+    // failure reason ("client disconnected") loses the words that say why.
+    out += "\n> " + firstLine(result.trim()) + "\n";
   } else if ((u.status || "").toLowerCase() === "failed") {
     out += "\n  \u274C Plan approval failed (bridge should auto-approve exit).";
   }
@@ -574,21 +551,15 @@ function formatGeneric(
   if (toolName && toolName !== label) out += `\n  tool: \`${toolName}\``;
   if (path) out += "\n  \u{1F4C4} " + pathCode(truncate(path, 120));
   if (cmd) {
-    out += "\n" + foldableBlock("\u{1F4BB} command: ", truncateMiddle(cmd, PREVIEW_MAX)) + "\n";
+    out += "\n> \u{1F4BB} command: " + truncateHead(firstLine(cmd), 20) + "\n";
   } else if (query) out += "\n  query: " + pathCode(truncate(query, 150), "query");
   else if (!path && !cmd) {
     const args = formatArgLines(raw);
-    if (args) out += "\n" + fence(truncateMiddle(args, PREVIEW_MAX)) + "\n";
+    if (args) out += "\n> " + truncateHead(firstLine(args), 20) + "\n";
   }
   const result = extractToolOutput(u);
   if (result) {
-    out +=
-      "\n" +
-      foldableBlock(
-        "\u{1F4BB} output: ",
-        truncateMiddleLines(result, OUTPUT_PREVIEW_LINES, OUTPUT_PREVIEW_MAX),
-      ) +
-      "\n";
+    out += "\n" + outputLine(result) + "\n";
   }
   return out;
 }

@@ -3,27 +3,52 @@ import { test } from "node:test";
 import { chunkMarkdown } from "../src/render/chunk.js";
 import { toTelegramMarkdown } from "../src/render/markdown.js";
 
-test("a short expandable quote is one chunk and stays closed", () => {
-  const src = "> \u{1F4AD} thinking: first\n> second line\n> third";
+test("a tool quote shows a short first line and folds the rest", () => {
+  const src = "> \u{1F4AD} thinking: first line that runs well past twenty characters\n> second line\n> third";
   const md = toTelegramMarkdown(src);
-  const chunks = chunkMarkdown(md, 4000);
-  assert.equal(chunks.length, 1);
-  assert.ok(chunks[0]!.includes("**>"));
-  assert.ok(chunks[0]!.trimEnd().endsWith("||"));
+  const lines = md.split("\n");
+  assert.ok(lines[0]!.startsWith(">\u{1F4AD} thinking:"));
+  assert.ok(lines[0]!.length < 40, lines[0]);
+  assert.ok(md.includes("**>"), "the rest stays folded");
+  assert.ok(md.trimEnd().endsWith("||"));
+  assert.ok(md.includes("second line"));
 });
 
-test("splitting an expandable quote closes it and reopens the next chunk", () => {
-  const bodies = Array.from({ length: 8 }, (_, i) => `> line ${i} ${"x".repeat(20)}`);
-  const src = [`> \u{1F4AD} thinking: head`, ...bodies].join("\n");
+test("a long single tool line is cut and not folded", () => {
+  const src = "> \u{1F4BB} command: " + "x".repeat(100);
   const md = toTelegramMarkdown(src);
-  const chunks = chunkMarkdown(md, 120);
-  assert.ok(chunks.length > 1, chunks.join("\n---\n"));
-  for (const chunk of chunks) {
-    const opens = (chunk.match(/\*\*>/g) ?? []).length;
-    const closes = (chunk.match(/\|\|/g) ?? []).length;
-    assert.equal(opens, closes, chunk);
-    assert.ok(!chunk.includes("**>\n||") && !chunk.endsWith("**>||"), chunk);
-  }
-  assert.ok(chunks[0]!.startsWith(">\u{1F4AD} thinking:"));
-  assert.ok(chunks[1]!.split("\n")[0] === "**>" || chunks[1]!.startsWith("**>"));
+  assert.equal(md.split("\n").length, 1);
+  assert.ok(!md.includes("**>"));
+  assert.ok(md.length < 40);
+});
+
+test("only the final answer quotes the user; thoughts and tool cards do not", async () => {
+  const { groupForReply } = await import("../src/stream/streamer.js");
+  const seg = (kind: "out" | "think" | "tool", text: string) => ({ kind, text });
+
+  const turn = groupForReply([
+    seg("think", "let me look this up"),
+    seg("tool", "grep reminders.json"),
+    seg("out", "Here is what I found."),
+  ]);
+  assert.equal(turn.length, 2);
+  assert.equal(turn[0]!.reply, false);
+  assert.ok(turn[0]!.text.includes("thinking:"));
+  assert.equal(turn[1]!.reply, true);
+  assert.ok(turn[1]!.text.includes("Here is what I found."));
+
+  // An answer followed by a later thought: only the last group, the thought, and
+  // it is not the answer, so nothing quotes the user.
+  const trailing = groupForReply([
+    seg("out", "Done."),
+    seg("think", "one more check"),
+  ]);
+  assert.equal(trailing.length, 2);
+  assert.equal(trailing[0]!.reply, false);
+  assert.equal(trailing[1]!.reply, false);
+
+  // A reply that is only the answer quotes the user.
+  const answer = groupForReply([seg("out", "Just the answer.")]);
+  assert.equal(answer.length, 1);
+  assert.equal(answer[0]!.reply, true);
 });

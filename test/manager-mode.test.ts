@@ -5,9 +5,7 @@ import {
   isManagerWorkReportPrompt,
   MANAGER_DIRECTIVE_MARKER,
   MANAGER_WORK_REPORT_MARKER,
-  wrapManagerDirective,
 } from "../src/render/manager-directive.js";
-import { textPrompt } from "../src/app/types.js";
 import { extractTelegramActions } from "../src/render/telegram-bridge.js";
 import {
   clearManagerJobsForTests,
@@ -37,18 +35,6 @@ describe("manager mode helpers", () => {
     // Private chats / missing thread are NOT General manager mode.
     assert.equal(isGeneralThread(undefined), false);
     assert.equal(isGeneralThread(42), false);
-  });
-
-  it("wraps manager directive once", () => {
-    const once = wrapManagerDirective(textPrompt("fix login in MyApp"));
-    assert.ok(once.text.startsWith(MANAGER_DIRECTIVE_MARKER));
-    assert.ok(once.text.includes("fix login in MyApp"));
-    const twice = wrapManagerDirective(once);
-    assert.equal(
-      twice.text.split(MANAGER_DIRECTIVE_MARKER).length - 1,
-      1,
-      "directive should not double-wrap",
-    );
   });
 
   it("builds and detects work report prompts", () => {
@@ -290,19 +276,11 @@ describe("manager mode helpers", () => {
     assert.equal(sessPrefix.ok, true);
   });
 
-  it("manager directive requires session_id for related-session follow-ups", async () => {
-    const { MANAGER_DIRECTIVE } = await import("../src/render/manager-directive.js");
-    assert.ok(MANAGER_DIRECTIVE.includes("session_id"));
-    assert.ok(
-      MANAGER_DIRECTIVE.includes("RESUME") || MANAGER_DIRECTIVE.includes("related session"),
-    );
-  });
-
-  it("manager directive requires quiet notify for user-facing chat", async () => {
-    const { MANAGER_DIRECTIVE } = await import("../src/render/manager-directive.js");
-    assert.ok(MANAGER_DIRECTIVE.includes("notify"));
-    assert.ok(/quiet by default/i.test(MANAGER_DIRECTIVE));
-    assert.ok(/never spam|job tables|sending to/i.test(MANAGER_DIRECTIVE));
+  it("session_id guidance lives in the bridge directive, not a manager prompt", async () => {
+    const { buildTelegramBridgeDirective } = await import("../src/render/telegram-bridge.js");
+    const dir = buildTelegramBridgeDirective({ forumReady: true, topicGroupId: -100, allowedBots: [] });
+    assert.ok(dir.includes("session_id"));
+    assert.ok(dir.includes("currently open session"));
   });
 
   it("pickManagerFallbackText drops tables and dispatch spam", async () => {
@@ -325,15 +303,15 @@ describe("manager mode helpers", () => {
     assert.ok(ok && ok.includes("ship gate"));
   });
 
-  it("notify action replies to user message when replyToMessageId set", async () => {
+  it("notify action sends nothing", async () => {
     const { executeTelegramActions } = await import("../src/bot/telegram-actions.js");
-    let captured: Record<string, unknown> | undefined;
+    let sent = 0;
     const results = await executeTelegramActions(
       [{ action: "notify", text: "Short update.", important: true }],
       {
         api: {
-          sendMessage: async (_chat: number, text: string, extra: Record<string, unknown>) => {
-            captured = { text, ...extra };
+          sendMessage: async () => {
+            sent++;
             return { message_id: 99 };
           },
         } as unknown as import("grammy").Api,
@@ -352,15 +330,8 @@ describe("manager mode helpers", () => {
       },
     );
     assert.equal(results[0]?.ok, true, results[0]?.error);
-    assert.equal(captured?.text, "Short update.");
-    assert.equal(captured?.disable_notification, false);
-    // General: no message_thread_id=1
-    assert.equal(captured?.message_thread_id, undefined);
-    assert.deepEqual(captured?.reply_parameters, {
-      message_id: 42,
-      allow_sending_without_reply: true,
-    });
-    assert.equal((results[0]?.data as { messageId?: number })?.messageId, 99);
+    assert.equal(sent, 0);
+    assert.equal((results[0]?.data as { skipped?: string })?.skipped, "notify-disabled");
   });
 
   it("send_prompt passes sessionId into submitTopicPrompt (not foreground-only)", async () => {

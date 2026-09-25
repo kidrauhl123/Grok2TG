@@ -22,7 +22,6 @@ import {
   type ReportBackMeta,
 } from "./manager-jobs.js";
 import type { TelegramBotService } from "./telegram-bots.js";
-import { takeKeyboardClear } from "./telegram-io.js";
 import type { TelegramAction } from "../render/telegram-bridge.js";
 
 const log = createLogger("telegram-actions");
@@ -104,7 +103,10 @@ async function runOne(
     case "send_prompt":
       return sendPrompt(action, ctx);
     case "notify":
-      return notifyUser(action, ctx);
+      // notify used to post a second copy of the reply. The reply text is the
+      // reply, so a notify never sends anything. Report it done so the model does
+      // not retry it.
+      return { action: "notify", ok: true, data: { skipped: "notify-disabled" } };
     case "search_memory":
       return searchMemory(action, ctx);
     case "list_topics":
@@ -208,55 +210,6 @@ function setPath(
       ? undefined
       : `\u{1F4C1} Topic **${b.name}** (#${b.threadId}) \u2192 \`${b.projectPath}\`${createdNote}`,
   };
-}
-
-/**
- * Explicit user-facing message. In General this is the only chat surface —
- * free-form agent prose is not streamed.
- */
-async function notifyUser(
-  action: Extract<TelegramAction, { action: "notify" }>,
-  ctx: TelegramActionContext,
-): Promise<TelegramActionResult> {
-  const text = action.text.trim();
-  if (!text) {
-    return { action: "notify", ok: false, error: "Empty notify text" };
-  }
-  try {
-    const extra: Record<string, unknown> = {
-      disable_notification: !action.important,
-      // General: never pass message_thread_id=1 (Telegram rejects it).
-      ...outboundThreadExtra(ctx.messageThreadId),
-    };
-    if (ctx.replyToMessageId !== undefined) {
-      extra.reply_parameters = {
-        message_id: ctx.replyToMessageId,
-        allow_sending_without_reply: true,
-      };
-    }
-    // Same pending clear as safeSend. General replies go through notify, which
-    // used to skip it, so a stale bar armed by the user's text never dropped.
-    const markup = takeKeyboardClear(ctx.chatId, extra);
-    if (markup) extra.reply_markup = markup;
-    const msg = await ctx.api.sendMessage(ctx.chatId, text, extra);
-    return {
-      action: "notify",
-      ok: true,
-      data: {
-        messageId: msg.message_id,
-        chars: text.length,
-        important: !!action.important,
-      },
-      // Never double-post via userNote — the message already went out.
-      userNote: undefined,
-    };
-  } catch (e) {
-    return {
-      action: "notify",
-      ok: false,
-      error: (e as Error).message ?? String(e),
-    };
-  }
 }
 
 async function sendPrompt(

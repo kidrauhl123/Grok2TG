@@ -9,12 +9,15 @@ import { contentText, type SessionUpdate, type ToolCallContent } from "../grok/t
 
 /** Max chars to show for search queries, command previews, etc. */
 export const PREVIEW_MAX = 600;
-/** Max chars for file content preview on write/create. */
-export const CONTENT_PREVIEW_MAX = 1000;
-/** Max chars for terminal / tool result bodies (display-only middle truncate). */
-export const OUTPUT_PREVIEW_MAX = 3500;
-/** Max lines for multi-line tool outputs before middle-omission. */
-export const OUTPUT_PREVIEW_LINES = 80;
+/** Max chars of a file write/create preview. */
+export const CONTENT_PREVIEW_MAX = 600;
+/**
+ * Max chars of command/tool output shown in chat. Kept well under Telegram's
+ * message limit so the card is one message and never has to be split.
+ */
+export const OUTPUT_PREVIEW_MAX = 600;
+/** Max lines of command/tool output shown in chat (head + tail, middle omitted). */
+export const OUTPUT_PREVIEW_LINES = 20;
 
 /**
  * Canonical display kinds used by the Telegram renderer.

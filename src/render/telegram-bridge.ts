@@ -54,24 +54,14 @@ export interface TelegramActionExtract {
  * Static teaching block. Dynamic capability lines are appended by
  * {@link buildTelegramBridgeDirective}.
  */
-export const TELEGRAM_BRIDGE_DIRECTIVE_BASE = [
-  TELEGRAM_BRIDGE_MARKER,
-  "This chat is driven over ACP by a Telegram bridge. To act on Telegram, put ONE fenced json block in your reply (it is stripped before the user sees it; results come back as TELEGRAM BRIDGE RESULTS):",
-  "```json",
-  '{ "telegram": [ { "action": "..." } ] }',
-  "```",
-  "Up to 9 actions, run in order. Actions:",
-  '- create_topic — new forum topic. Optional "path" binds it (absolute path or exact catalog name); a missing absolute path is created on disk.',
-  '- set_path — rebind an existing topic. "topic" is its exact title or #threadId; "path" as above.',
-  '- send_prompt — queue work in another topic (returns immediately, does not wait). "topic" = exact title, #threadId, "general", or "ai chat" — never placeholders like "…", "...", "topic", or "there"; call list_topics if unsure. Optional "new_session": true starts fresh. Optional "session_id" (full UUID or short prefix) RESUMES that exact session and wins over new_session; with it, "topic" may be omitted and is inferred from the session path. session_id is required when memory found the session the user wants continued — without it the topic\'s current foreground session is used, which is often wrong. From General you MUST dispatch here and never code in General. The child auto-reports back with a MANAGER WORK REPORT.',
-  "- notify — the only way to speak to the user in General. Quiet by default: search, dispatch, and process with no notify. Notify only to answer what was asked, report an important failure, or give an outcome the user needs. Max 3 per turn, prefer one short line. Never notify dispatch chatter, job tables, or \"sending to…\".",
-  '- search_memory — "query", optional "limit" (default 8). Searches topics, session titles, comments, and history. Do this before any git or shell.',
+export const TELEGRAM_BRIDGE_ACTIONS = [
+  '- create_topic — new forum topic. Optional "path" binds it (absolute path or a catalog name); a missing absolute path is created.',
+  '- set_path — rebind a topic. "topic" is its exact title or #threadId.',
+  '- send_prompt — queue work in another topic; returns immediately. "topic" is its exact title, #threadId, "general", or "ai chat". To continue a session found in memory, set "session_id" — without it the topic\'s currently open session is used, which is often the wrong one. With "session_id", "topic" may be omitted. "new_session": true starts fresh.',
+  '- search_memory — "query", optional "limit" (default 8). Searches topics, session titles, comments, and history.',
   "- list_topics — every mapped topic: name, #id, path, kind.",
-  "- list_jobs — recent dispatches from General and their status.",
-  "- list_bots — allowlisted sibling bots and their commands.",
-  '- bot_command — run "/command" on a sibling bot and wait for it to settle. "bot" without @, "command", optional "args". A timeout returns ok=false and is not a Done.',
-  "One block per turn. Use the bridge results; do not invent them or re-emit an action that already succeeded.",
-].join("\n");
+  "- list_jobs — recent dispatches and their status.",
+];
 
 export interface TelegramBridgeCaps {
   forumReady: boolean;
@@ -85,42 +75,22 @@ export interface TelegramBridgeCaps {
 
 /** Full first-prompt directive including live capabilities. */
 export function buildTelegramBridgeDirective(caps: TelegramBridgeCaps): string {
-  const lines = [TELEGRAM_BRIDGE_DIRECTIVE_BASE, "", "Capabilities right now:"];
-  if (caps.forumReady && caps.topicGroupId !== undefined) {
+  const lines = [
+    TELEGRAM_BRIDGE_MARKER,
+    "To act on Telegram, put ONE fenced json block in your reply (it is stripped before the user sees it; results come back as TELEGRAM BRIDGE RESULTS):",
+    "```json",
+    '{ "telegram": [ { "action": "..." } ] }',
+    "```",
+    "Up to 9 actions, run in order. One block per turn. Use the results; do not invent them or repeat an action that already succeeded.",
+    ...TELEGRAM_BRIDGE_ACTIONS,
+  ];
+  // Only say so when it is broken. When topics work, the actions above are enough.
+  if (!(caps.forumReady && caps.topicGroupId !== undefined)) {
     lines.push(
-      `- Forum topics: READY (group ${caps.topicGroupId}). You may create_topic, set_path, and send_prompt.`,
-      `- General is the manager topic (orchestrates only). AI Chat uses GROK_WORKSPACE for coding there; project topics use their bound path.`,
-    );
-  } else if (caps.topicGroupId !== undefined) {
-    lines.push(
-      `- Forum topics: NOT READY (group ${caps.topicGroupId} configured but setup failed or bot is not admin). Do not rely on create_topic / set_path / send_prompt.`,
-    );
-  } else {
-    lines.push("- Forum topics: OFF (TOPIC_GROUP_ID unset). create_topic / set_path / send_prompt will fail.");
-  }
-  if (caps.allowedBots.length > 0) {
-    lines.push(
-      `- Sibling bots (allowlist): ${caps.allowedBots.map((b) => "@" + b).join(", ")}. Use list_bots / bot_command like MCP.`,
-    );
-    for (const u of caps.allowedBots) {
-      const cmds = caps.botCommands?.[u];
-      if (cmds && cmds.length > 0) {
-        lines.push(
-          `  - @${u}: ${cmds
-            .map((c) => (c.description ? `/${c.command} (${c.description})` : `/${c.command}`))
-            .join(", ")}`,
-        );
-      }
-    }
-  } else {
-    lines.push(
-      "- Sibling bots: none configured (ALLOWED_TELEGRAM_BOTS empty). list_bots returns empty; bot_command disabled.",
-    );
-  }
-  lines.push("- search_memory / list_topics / list_jobs: available against bot-owned indexes.");
-  if (caps.managerMode) {
-    lines.push(
-      "- You are in General manager mode: chat-like replies only; memory-first; dispatch via send_prompt; child work auto-reports back.",
+      "",
+      caps.topicGroupId !== undefined
+        ? `Forum topics are NOT ready (group ${caps.topicGroupId} configured but setup failed or the bot is not admin). create_topic, set_path, and send_prompt will fail.`
+        : "Forum topics are OFF (TOPIC_GROUP_ID unset). create_topic, set_path, and send_prompt will fail.",
     );
   }
   return lines.join("\n");

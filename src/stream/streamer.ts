@@ -16,7 +16,7 @@ import { toTelegramMarkdown } from "../render/markdown.js";
 import { stripProgressMarkers } from "../render/progress.js";
 import { stripTelegramActionFences } from "../render/telegram-bridge.js";
 import { truncateMiddle } from "../render/truncate.js";
-import { safeEdit, safeSend } from "../bot/telegram-io.js";
+import { safeEdit, safeSend, sendRichMarkdown } from "../bot/telegram-io.js";
 import { outboundThreadExtra } from "../forum/thread.js";
 
 const SOFT_LIMIT = 3500;
@@ -134,7 +134,7 @@ export class ResponseStreamer {
         if (this.closed || this.liveId !== undefined) return;
         const src = placeholder.trim() || "\u23F3 Working\u2026";
         const rendered = toTelegramMarkdown(src);
-        this.liveId = await safeSend(this.api, this.chatId, rendered, src, this.replyExtra());
+        this.liveId = await safeSend(this.api, this.chatId, rendered, src, this.replyExtra(false));
       } finally {
         this.ensureSurfaceInflight = undefined;
       }
@@ -162,12 +162,13 @@ export class ResponseStreamer {
     return outboundThreadExtra(this.messageThreadId);
   }
 
-  /** reply_parameters threading EVERY message of the turn to the user's prompt,
-   *  so the whole response (all bubbles, tool calls and continuations) stays in
-   *  one thread — not just the first message. Also carries forum topic id. */
-  private replyExtra(): Record<string, unknown> {
+  /** reply_parameters threading a message to the user's prompt, plus the forum
+   *  topic id. Only the final answer quotes the prompt; thoughts, tool cards and
+   *  the live "working" bubble are sent on their own so the quote marks the
+   *  answer and nothing else. */
+  private replyExtra(reply: boolean): Record<string, unknown> {
     const extra: Record<string, unknown> = { ...this.threadExtra() };
-    if (this.replyTo !== undefined) {
+    if (reply && this.replyTo !== undefined) {
       extra.reply_parameters = { message_id: this.replyTo, allow_sending_without_reply: true };
     }
     return extra;
@@ -177,6 +178,10 @@ export class ResponseStreamer {
     if (!text) return;
     this.merge("out", text);
     this.noteRealContent();
+    // The answer is sent once, when the turn finishes. Editing one bubble as the
+    // text grows leaves it stuck on a half-written edit, so prose is not flushed
+    // live. Thoughts and tool cards still stream.
+    if (!this.segs.slice(this.sealedIdx).some((s) => s.kind !== "out")) return;
     this.schedule();
   }
 
@@ -331,11 +336,25 @@ export class ResponseStreamer {
     this.flushing = true;
     this.dirty = false;
     try {
-      await this.sealOverflow();
-      const base = this.captureProgress(renderSegs(this.segs.slice(this.sealedIdx)));
+      await this.sealOverflow(final);
+      const liveSegs = this.segs.slice(this.sealedIdx);
+      const base = this.captureProgress(renderSegs(liveSegs));
+      // The live bubble quotes the user only while it holds the answer. A thought
+      // or tool card is sealed off before the answer arrives, so this is the answer
+      // exactly when the remaining segments are prose.
+      const liveReply = liveSegs.some((s) => s.kind === "out");
       // Never send an empty / progress-only bubble. Plan alone is allowed so the
       // board is visible as soon as the agent publishes steps.
       if (!base.trim() && !this.planMarkdown && !this.livenessLine) return;
+      // The answer, on its own, goes out as a rich message with the model's raw
+      // Markdown. Only when nothing else shares the bubble: a plan board or a
+      // liveness line is rendered text, and a rich message cannot be edited.
+      if (final && base.trim() && liveSegs.every((s) => s.kind === "out") && !this.planMarkdown && !this.livenessLine) {
+        await sendRichMarkdown(this.api, this.chatId, `${base}${this.footerSuffix()}`, this.replyExtra(true));
+        this.liveId = undefined;
+        this.sealedIdx = this.segs.length;
+        return;
+      }
       // Live bubble: body → plan → liveness (silent tools) → footer.
       const parts: string[] = [];
       if (base.trim()) parts.push(base);
@@ -348,7 +367,7 @@ export class ResponseStreamer {
       const plain = chunkMarkdown(src);
       if (chunks.length <= 1) {
         const mdv2 = chunks[0] ?? rendered;
-        if (this.liveId === undefined) this.liveId = await safeSend(this.api, this.chatId, mdv2, src, this.replyExtra());
+        if (this.liveId === undefined) this.liveId = await safeSend(this.api, this.chatId, mdv2, src, this.replyExtra(liveReply));
         else await safeEdit(this.api, this.chatId, this.liveId, mdv2, src);
       } else {
         // Remainder no longer fits one message: flush all, last stays live.
@@ -356,8 +375,8 @@ export class ResponseStreamer {
           const mdv2 = chunks[i]!;
           const p = plain[i] ?? mdv2;
           if (i === 0 && this.liveId !== undefined) await safeEdit(this.api, this.chatId, this.liveId, mdv2, p);
-          else if (i < chunks.length - 1) await safeSend(this.api, this.chatId, mdv2, p, this.replyExtra());
-          else this.liveId = await safeSend(this.api, this.chatId, mdv2, p, this.replyExtra());
+          else if (i < chunks.length - 1) await safeSend(this.api, this.chatId, mdv2, p, this.replyExtra(liveReply));
+          else this.liveId = await safeSend(this.api, this.chatId, mdv2, p, this.replyExtra(liveReply));
         }
         this.sealedIdx = this.segs.length; // everything before the live tail is sealed
       }
@@ -366,11 +385,13 @@ export class ResponseStreamer {
     }
   }
 
-  /** Seal leading segments into finalized messages while the live view is too big. */
-  private async sealOverflow(): Promise<void> {
+  /** Seal leading segments into finalized messages while the live view is too big,
+   *  and always seal at a thought/tool → answer boundary so the answer can quote
+   *  the user on its own message. */
+  private async sealOverflow(final = false): Promise<void> {
     let live = this.segs.slice(this.sealedIdx);
-    while (live.length > 1 && toTelegramMarkdown(renderSegs(live)).length > SOFT_LIMIT) {
-      const headCount = live.length - 1;
+    while (live.length > 1 && this.shouldSealHead(live, final)) {
+      const headCount = this.sealHeadCount(live);
       await this.seal(this.sealedIdx, this.sealedIdx + headCount);
       this.sealedIdx += headCount;
       this.liveId = undefined;
@@ -378,10 +399,45 @@ export class ResponseStreamer {
     }
   }
 
+  /** True when the live view must shed its leading segments. */
+  private shouldSealHead(live: Seg[], final = false): boolean {
+    if (live.length <= 1) return false;
+    if (toTelegramMarkdown(renderSegs(live)).length > SOFT_LIMIT) return true;
+    // A thought or tool card followed by the answer: seal the thought so the
+    // answer starts a fresh message that quotes the user. At the end of the turn
+    // the answer is sealed on its own too, so it is sent once instead of edited
+    // onto the thought's bubble.
+    if (groupForReply(live).length > 1 && live[0]!.kind !== "out") return true;
+    // The answer is its own message. Once it is the head, anything after it
+    // (a later command or thought) must be sealed off too, or it is edited into
+    // the answer and the answer's tail never goes out on its own.
+    if (live[0]!.kind === "out" && live.some((s) => s.kind !== "out")) return true;
+    return final && live.some((s) => s.kind === "out") && live[0]!.kind !== "out";
+  }
+
+  /** How many leading segments to seal: up to the first kind change, else all but one. */
+  private sealHeadCount(live: Seg[]): number {
+    const firstOut = live[0]!.kind === "out";
+    for (let i = 1; i < live.length; i++) {
+      if ((live[i]!.kind === "out") !== firstOut) return i;
+    }
+    return live.length - 1;
+  }
+
   private async seal(from: number, to: number): Promise<void> {
-    const base = this.captureProgress(renderSegs(this.segs.slice(from, to)));
+    const slice = this.segs.slice(from, to);
+    const base = this.captureProgress(renderSegs(slice));
     if (!base.trim()) return;
-    // A sealed bubble is finished, so it carries the footer (hashtags).
+    // The answer goes out as a rich message: the model's raw Markdown, so
+    // headings, tables and task lists render as written. Thoughts and tool
+    // cards stay on the MarkdownV2 path below.
+    if (slice.every((s) => s.kind === "out")) {
+      await sendRichMarkdown(this.api, this.chatId, `${base}${this.footerSuffix()}`, this.replyExtra(true));
+      return;
+    }
+    // A sealed bubble is finished, so it carries the footer (hashtags). It quotes
+    // the user only when it is the answer; a sealed thought or tool card does not.
+    const reply = slice.some((s) => s.kind === "out");
     const src = `${base}${this.footerSuffix()}`;
     const chunks = chunkMarkdown(toTelegramMarkdown(src));
     const plain = chunkMarkdown(src);
@@ -389,9 +445,45 @@ export class ResponseStreamer {
       const mdv2 = chunks[i]!;
       const p = plain[i] ?? mdv2;
       if (i === 0 && this.liveId !== undefined) await safeEdit(this.api, this.chatId, this.liveId, mdv2, p);
-      else await safeSend(this.api, this.chatId, mdv2, p, this.replyExtra());
+      else await safeSend(this.api, this.chatId, mdv2, p, this.replyExtra(reply));
     }
   }
+}
+
+/** A run of segments that should travel as one bubble, and whether it replies. */
+export interface RenderGroup {
+  text: string;
+  /** Only the final answer quotes the user's message. Thoughts and tool cards do not. */
+  reply: boolean;
+}
+
+/**
+ * Group segments into bubbles so a thought or a tool card never shares a message
+ * with the answer. The answer is the only part that quotes the user's message, so
+ * it must be its own bubble; everything before it is sent without a reply.
+ * `reply` is true only for the last group, and only when that group is the answer.
+ */
+export function groupForReply(segs: Seg[]): RenderGroup[] {
+  const groups: RenderGroup[] = [];
+  let buf: Seg[] = [];
+  let bufReply = false;
+  const flush = (): void => {
+    if (buf.length === 0) return;
+    const text = renderSegs(buf);
+    if (text.trim()) groups.push({ text, reply: bufReply });
+    buf = [];
+  };
+  for (const s of segs) {
+    const reply = s.kind === "out";
+    if (buf.length > 0 && reply !== bufReply) flush();
+    buf.push(s);
+    bufReply = reply;
+  }
+  flush();
+  if (groups.length > 1) {
+    for (let i = 0; i < groups.length - 1; i++) groups[i]!.reply = false;
+  }
+  return groups;
 }
 
 function renderSegs(segs: Seg[]): string {

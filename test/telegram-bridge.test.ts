@@ -195,8 +195,10 @@ describe("extractTelegramActions", () => {
       topicGroupId: -100,
       allowedBots: [],
     });
-    assert.ok(dir.includes("notify"));
-    assert.ok(dir.includes("Quiet by default") || dir.includes("quiet"));
+    // notify is not offered: the reply text is the reply, so a notify action
+    // would only ever duplicate it.
+    assert.ok(!dir.includes("notify"));
+    assert.ok(!dir.includes("Quiet by default"));
   });
 
   it("parses send_prompt session_id (and sess_ prefix forms)", () => {
@@ -246,14 +248,14 @@ describe("extractTelegramActions", () => {
       allowedBots: [],
     });
     assert.ok(dir.includes("session_id"));
-    assert.ok(dir.includes("RESUMES") || dir.includes("resume") || dir.includes("019fc9ec"));
-    assert.ok(dir.includes("NEVER use placeholders") || dir.includes("placeholders"));
+    assert.ok(dir.includes("currently open session"));
+    assert.ok(dir.includes("NEVER use placeholders") || dir.includes("placeholders") || dir.includes("exact title"));
   });
 });
 
 describe("wrapTelegramBridgePrompt", () => {
-  it("inserts after complexity User task marker", () => {
-    const input = textPrompt("COMPLEXITY (decide yourself)\n\nUser task:\nfix the bug");
+  it("inserts the bridge directive before the user task", () => {
+    const input = textPrompt("fix the bug");
     const dir = buildTelegramBridgeDirective({
       forumReady: true,
       topicGroupId: -100,
@@ -261,9 +263,10 @@ describe("wrapTelegramBridgePrompt", () => {
     });
     const out = wrapTelegramBridgePrompt(input, dir);
     assert.ok(out.text.includes(TELEGRAM_BRIDGE_MARKER));
-    assert.ok(out.text.includes("User task (continued):"));
     assert.ok(out.text.includes("fix the bug"));
-    assert.ok(out.text.includes("@helperbot"));
+    assert.ok(out.text.indexOf(TELEGRAM_BRIDGE_MARKER) < out.text.indexOf("fix the bug"));
+    // Sibling bots are not taught here.
+    assert.ok(!out.text.includes("@helperbot"));
     // Idempotent
     const again = wrapTelegramBridgePrompt(out, dir);
     assert.equal(again.text, out.text);

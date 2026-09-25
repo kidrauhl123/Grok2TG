@@ -1175,11 +1175,10 @@ export class SessionRuntime {
     // A new streamed turn supersedes any transient "follow" watch of this same
     // session's previous in-flight turn (avoids duplicated output).
     if (this.watchIsFollow) this.stopWatch();
-    // Manager (General): quiet-by-default — no prose stream. User-facing text
-    // only via notify actions (or one fallback reply for direct user asks).
-    // Project topics stream when foreground. Raw slash (/goal) always streams.
+    // Every foreground topic streams the same way, General included. Raw slash
+    // commands stream too, even from a background session.
     const rawSlash = !!input.rawSlashCommand;
-    const live = (this.foreground && !this.managerMode) || rawSlash;
+    const live = this.foreground || rawSlash;
     const startedAt = Date.now();
     this.turnStartedAt = startedAt;
     this.managerNotifyCount = 0;
@@ -1984,6 +1983,12 @@ export class SessionRuntime {
     stopReason: string | undefined,
     startedAt: number,
   ): Promise<void> {
+    // General streams like any other topic now, so a live turn already showed
+    // its thinking, tools and answer. Don't delete or rewrite that.
+    if (this.streamer) {
+      this.managerStatusMsgId = undefined;
+      return;
+    }
     const elapsed = fmtDuration(Date.now() - startedAt);
     if (this.cancelled || stopReason === "cancelled") {
       this.lastCompletion = `\u23F9 Stopped \u00B7 ${elapsed}`;

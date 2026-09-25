@@ -100,7 +100,7 @@ test("run_terminal_command shows bash command", () => {
   assert.ok(!md.includes("Call MCP"), md);
 });
 
-test("read file body keeps the first line open and folds the rest", () => {
+test("read file body shows one short line", () => {
   const u = {
     sessionUpdate: "tool_call_update",
     kind: "read",
@@ -115,12 +115,10 @@ test("read file body keeps the first line open and folds the rest", () => {
   } as SessionUpdate;
   const md = toTelegramMarkdown(formatToolCall(u, opts));
   assert.ok(md.includes(">\u{1F4D6} file:"), md);
-  assert.ok(md.includes("**>"), md);
-  assert.ok(md.includes("||"), md);
-  assert.ok(md.includes("Menu surfaces"), md);
+  assert.ok(!md.includes("Menu surfaces"), md);
 });
 
-test("a multi-line command keeps its first line open and folds the rest", () => {
+test("a command shows only its first line", () => {
   const u = {
     sessionUpdate: "tool_call",
     kind: "execute",
@@ -129,11 +127,11 @@ test("a multi-line command keeps its first line open and folds the rest", () => 
   } as SessionUpdate;
   const md = toTelegramMarkdown(formatToolCall(u, opts));
   assert.ok(md.includes(">\u{1F4BB} command: echo one"), md);
-  assert.ok(md.includes("**>echo two"), md);
-  assert.ok(md.includes("echo three||"), md);
+  assert.ok(!md.includes("echo two"), md);
+  assert.ok(!md.includes("echo three"), md);
 });
 
-test("a long command line is cut while later lines stay folded", () => {
+test("a long command line is cut to one short line", () => {
   const long = "x".repeat(500);
   const u = {
     sessionUpdate: "tool_call",
@@ -144,7 +142,7 @@ test("a long command line is cut while later lines stay folded", () => {
   const md = toTelegramMarkdown(formatToolCall(u, opts));
   assert.ok(md.includes("\u2026"), md);
   assert.ok(!md.includes(long), md);
-  assert.ok(md.includes("echo tail||"), md);
+  assert.ok(!md.includes("echo tail"), md);
 });
 
 test("namespaced MCP still labeled MCP with args", () => {
@@ -195,7 +193,7 @@ test("list_dir shows directory", () => {
   assert.ok(!md.includes("Call MCP"), md);
 });
 
-test("execute output uses single live-tail block", () => {
+test("execute output is one short line", () => {
   const longOut = Array.from({ length: 40 }, (_, i) => `out-${i}`).join("\n");
   const u = {
     sessionUpdate: "tool_call_update",
@@ -207,10 +205,10 @@ test("execute output uses single live-tail block", () => {
   } as SessionUpdate;
   const md = formatToolCall(u, opts);
   assert.ok(md.includes("npm test"), md);
-  assert.ok(md.includes("out-0"), md);
   const rendered = toTelegramMarkdown(md);
   assert.ok(rendered.includes(">\u{1F4BB} output:"), rendered);
-  assert.ok(rendered.includes("**>out\\-1"), rendered);
+  assert.ok(rendered.includes("out\\-0"), rendered);
+  assert.ok(!rendered.includes("out\\-1"), rendered);
 });
 
 test("completed update merged with prior rawInput is not bare Tool call", async () => {

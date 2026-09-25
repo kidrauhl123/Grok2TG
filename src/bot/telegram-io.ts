@@ -129,6 +129,30 @@ export async function safeSend(
   }
 }
 
+/** Send the agent's answer as a rich message: the model's raw Markdown, untouched.
+ *  Telegram renders headings, tables and task lists itself. Tool cards and
+ *  thinking stay on the MarkdownV2 path. */
+export async function sendRichMarkdown(
+  api: Api,
+  chatId: number,
+  markdown: string,
+  extra: Record<string, unknown> = {},
+): Promise<number | undefined> {
+  const markup = takeKeyboardClear(chatId, extra);
+  try {
+    const msg = await withRetry(() =>
+      api.sendRichMessage(chatId, { markdown }, {
+        ...extra,
+        ...(markup ? { reply_markup: markup } : {}),
+      }),
+    );
+    return msg.message_id;
+  } catch (err) {
+    log.warn("sendRichMessage failed:", (err as Error).message);
+    return undefined;
+  }
+}
+
 /** Edit a message as MarkdownV2, falling back to demoted plain text on parse errors. */
 export async function safeEdit(
   api: Api,

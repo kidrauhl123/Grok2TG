@@ -178,15 +178,16 @@ function renderTextBlock(text: string): string {
       bodies.push(next[2] ?? "");
       i += 1;
     }
-    // Thinking and command cards are one quote. An expandable quote hides
-    // every line, so keep the first line open and collapse only the rest.
+    // Tool and thinking quotes keep the first line short and collapse the rest.
+    // The visible line is cut so a long command never fills the chat; the
+    // remainder stays in the expandable quote.
     if (isFoldableQuote(bodies[0] ?? "")) {
-      const first = ">" + renderQuoteInline(bodies[0] ?? "");
+      const first = ">" + renderQuoteInline(shortQuote(bodies[0] ?? ""));
       const rest = bodies.slice(1);
-      // Command cards leave the folded lines unquoted, so they arrive here as
-      // the following plain lines rather than more `>` lines.
+      // Only real following lines belong to the fold. A blank line is the gap
+      // before the next block, not part of the command.
       if (rest.length === 0) {
-        while (i < lines.length && (lines[i] ?? "") !== "") {
+        while (i < lines.length && (lines[i] ?? "") !== "" && !/^>\s?/.test(lines[i] ?? "")) {
           rest.push(lines[i] ?? "");
           i += 1;
         }
@@ -197,6 +198,15 @@ function renderTextBlock(text: string): string {
     }
   }
   return out.join("\n");
+}
+
+/** How many characters of a tool or thinking quote stay visible. */
+const QUOTE_PREVIEW = 20;
+
+/** One short line: the first line, cut at the preview budget. */
+function shortQuote(body: string): string {
+  const line = body.split("\n")[0] ?? "";
+  return line.length > QUOTE_PREVIEW ? line.slice(0, QUOTE_PREVIEW - 1) + "…" : line;
 }
 
 /** First line of a quote that keeps itself visible and folds the rest. */

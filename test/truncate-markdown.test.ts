@@ -10,8 +10,7 @@ import {
 import { extractToolOutput } from "../src/render/tool-call-detail.js";
 import { formatToolCall } from "../src/render/tool-call.js";
 import type { SessionUpdate } from "../src/grok/types.js";
-import { wrapAutoComplexityPrompt, pickPlanModeId } from "../src/bot/complexity-gate.js";
-import { textPrompt } from "../src/app/types.js";
+import { pickPlanModeId } from "../src/bot/complexity-gate.js";
 
 test("truncateMiddle keeps head and tail", () => {
   const s = "A".repeat(100) + "MID" + "B".repeat(100);
@@ -84,17 +83,6 @@ test("formatExecute includes command output when present", () => {
   const md = formatToolCall(u, { showDiffs: true, diffMaxLines: 40 });
   assert.ok(md.includes("echo hi"));
   assert.ok(md.includes("Output") || md.includes("hi"));
-});
-
-test("wrapAutoComplexityPrompt steers agent without asking the user", () => {
-  const wrapped = wrapAutoComplexityPrompt(textPrompt("add auth"));
-  assert.ok(wrapped.text.includes("decide yourself"));
-  assert.ok(wrapped.text.includes("never ask the user") || wrapped.text.includes("Do NOT ask"));
-  assert.ok(wrapped.text.includes("add auth"));
-  assert.ok(wrapped.text.includes("plan"));
-  // Idempotent wrap.
-  const twice = wrapAutoComplexityPrompt(wrapped);
-  assert.equal(twice.text, wrapped.text);
 });
 
 test("pickPlanModeId finds plan-like modes", () => {

@@ -51,7 +51,7 @@ describe("parseTelegramBotCommands", () => {
 });
 
 describe("buildTelegramBridgeDirective with commands", () => {
-  it("lists per-bot commands in capabilities", () => {
+  it("does not teach sibling bots; that belongs in a skill, not every session", () => {
     const d = buildTelegramBridgeDirective({
       forumReady: false,
       allowedBots: ["helperbot"],
@@ -62,8 +62,8 @@ describe("buildTelegramBridgeDirective with commands", () => {
         ],
       },
     });
-    assert.ok(d.includes("@helperbot"));
-    assert.ok(d.includes("/status"));
-    assert.ok(d.includes("/help (Help text)"));
+    assert.ok(!d.includes("@helperbot"));
+    assert.ok(!d.includes("bot_command"));
+    assert.ok(!d.includes("list_bots"));
   });
 });
