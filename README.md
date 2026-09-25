@@ -38,6 +38,9 @@ re-architected for the Grok Build CLI and extended into a full multi-session cli
 | 🟢 **Connect to live sessions** | `/active` shows sessions running **right now** on your PC. Watch them live, or continue them — see below. |
 | 🛑 **Kill a session / PID** | Each live `/sessions` · `/active` card has a **🛑 Kill · pid N** button (confirm-guarded) that stops that session's process and its child tree; `/killall` stops them all. The bot's own agent is never killable. **Stop** only cancels the current session turn — never the shared agent. |
 | 📡 **Live watch** | Follow a running session read-only in real time (tails its event log). |
+| 💭 **Process bubble** | Thinking and tool lines stream into one collapsible rich-text bubble: `Working...` while the turn runs, `Worked for Ns` once it finishes. It is not a reply to your message. |
+| 📝 **Rich answers** | A finished answer that contains a pipe table, task list, `<details>` block or `$$` math is sent as Telegram rich text. Ordinary replies stay MarkdownV2. Toggle per chat with `/rich`. |
+| 🔁 **Restart resume** | A turn cut off by a bot restart is picked up on the next start: the bot re-sends a continue prompt so the work carries on instead of stopping silently. |
 | 🧭 **Menu** | `/menu` opens the inline menu. A pinned status panel appears while a task runs (and clears when idle), showing your current **project, agent, reasoning effort, model, session and queue**. |
 | ⏰ **Scheduled tasks** | Create prompts that run on a schedule (once / daily / weekly / monthly / every-N-minutes) in a chosen project, delivered back to your chat. |
 | 🖼 **Multi-image prompts** | Send one or many photos (albums included) with a caption — all attached to the prompt for the agent to analyze. |
@@ -84,6 +87,8 @@ re-architected for the Grok Build CLI and extended into a full multi-session cli
 | Persistent menu + live status panel | ✅ | ❌ |
 | Agent / reasoning / model menus | ✅ | ❌ |
 | Combined, throttled output (no spam) | ✅ | ❌ |
+| Collapsible process bubble + rich answers | ✅ | ❌ |
+| Resume a turn cut off by a restart | ✅ | ❌ |
 | Auto-restart + session re-bind | ✅ | ❌ |
 | 24/7 cross-platform service | ✅ | ❌ |
 | 1-click install | ✅ | ❌ |
@@ -242,6 +247,9 @@ Logs are written to `logs/grok-telegram-bot.log` (rotated at 5 MB).
 /forum_setup  Re-probe / create forum topics (use inside the configured group)
 /status       Current session, project & queue
 /usage        Account info & current context usage
+/rich         /rich on|off — rich text for answers that need it (tables, task lists, math)
+/import       Import a running session from a sibling bot (Kiro, OpenCode, Claude, Codex)
+/sandbox      Show or set the Grok sandbox profile (needs /restart)
 /btw <text>   Run it now if idle, else queue to run right after the current task
 /flush        Send queued follow-ups now
 /queue        Show queued follow-ups
@@ -258,6 +266,13 @@ Logs are written to `logs/grok-telegram-bot.log` (rotated at 5 MB).
 
 Anything that isn't a command is sent to Grok as a prompt. While a turn is
 running, your messages are queued and sent automatically when it finishes.
+
+A second set of commands is forwarded straight to Grok's own slash commands:
+`/compact`, `/context`, `/session_info`, `/fork`, `/rewind`, `/copy`, `/export`,
+`/delete`, `/rename`, `/effort`, `/plan`, `/view_plan`, `/memory`, `/remember`,
+`/dream`, `/skills`, `/plugins`, `/hooks`, `/imagine`, `/imagine_video`, `/loop`,
+`/goal`, `/deep_research`, `/workflow`, `/workflows`, `/doctor`. Each one runs
+inside the current session.
 
 ---
 
@@ -480,9 +495,16 @@ Telegram  ──HTTPS──▶  Bot (grammY)
 ```
 
 One `grok agent stdio` process multiplexes many sessions. After `initialize` the
-bot runs `authenticate` (using the cached `grok login` token, or `XAI_API_KEY`),
-then streamed `agent_message_chunk` updates are assembled into a live, throttled
-message and `tool_call` updates render as status lines with diffs.
+bot runs `authenticate` (using the cached `grok login` token, or `XAI_API_KEY`).
+Thinking and tool calls stream into a single collapsible rich-text bubble that
+stays open while the turn runs and collapses to `Worked for Ns` when it ends.
+The finished answer is a separate message: MarkdownV2 by default, or Telegram
+rich text when it contains a table, task list, collapsible block or block math.
+
+A turn that a restart cuts off leaves its session lock on disk. The next start
+finds that lock and re-sends a continue prompt, so the work resumes instead of
+stopping with no notice. Grok's own session state does not survive the killed
+process, so the resume opens a fresh session primed with the recent transcript.
 
 The bot records the sessions **it** drives on disk under `<data>/sessions/`:
 `<id>.json` (metadata), `<id>.jsonl` (history, used by `/history` and live
@@ -580,7 +602,10 @@ user. See [SECURITY.md](./SECURITY.md) for the full model.
 - [x] Forum project topics + AI Chat workspace (`TOPIC_GROUP_ID`)
 - [x] Cross-topic Telegram bridge (`create_topic` / `set_path` / `send_prompt` / …)
 - [x] Prompt anchors, post-turn suggestions, gated self-recheck
-- [ ] **Token & cost meter** — per-session token counts and an estimated spend tally
+- [x] Collapsible process bubble (thinking + tools in one rich-text message)
+- [x] Rich-text final answers for tables, task lists and math (`/rich`)
+- [x] Resume a turn cut off by a bot restart
+- [ ] **Token & cost meter** — blocked: Grok CLI's ACP does not report per-turn token usage, so the bridge cannot count it
 - [ ] **Text-to-speech replies** — optionally speak answers back as voice notes
 - [ ] **Scheduled-task chaining & conditions** — run task B after A, or only if a command/file check passes
 - [ ] **Team mode** — roles and audit log beyond shared `ALLOWED_USERS` + forum topics
