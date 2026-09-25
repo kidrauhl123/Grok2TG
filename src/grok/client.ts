@@ -15,6 +15,7 @@ import { EventEmitter } from "node:events";
 import { createLogger } from "../logger.js";
 import { hasLogin } from "../app/grok-credentials.js";
 import { contextWindowFor, DEFAULT_MODEL, KNOWN_MODELS } from "./models.js";
+import { stripBodyFormatDirective } from "../render/body-format.js";
 import { IMAGE_OUTPUT_DIRECTIVE } from "../render/image-output.js";
 import { SessionLog } from "./session-log.js";
 import { JsonRpcTransport } from "./transport.js";
@@ -271,6 +272,8 @@ export class GrokClient extends EventEmitter {
   private readonly cwd = new Map<string, string>();
   /** Sessions with an in-flight prompt (drives "active"). */
   private readonly running = new Set<string>();
+  /** Turns a shutdown set aside, so the exit handler does not delete their lock. */
+  private readonly preserved = new Set<string>();
   /** In-flight prompt request id per session (at most one prompt per session). */
   private readonly promptReqBySession = new Map<string, number | string>();
   /** Timers that force-complete a cancelled prompt if the agent is slow. */
@@ -567,6 +570,9 @@ export class GrokClient extends EventEmitter {
       this.promptReqBySession.delete(sessionId);
     }
     this.running.delete(sessionId);
+    // A shutdown kept this turn's lock on purpose. Settling it now would delete
+    // the marker, and the next process would not resume it.
+    if (this.preserved.delete(sessionId)) return;
     this.slog.unlock(sessionId);
     const buf = this.assistantBuf.get(sessionId);
     if (buf && buf.trim()) this.slog.logAssistant(sessionId, buf);
@@ -687,13 +693,13 @@ export class GrokClient extends EventEmitter {
     if (opts.grokMemory !== undefined) this.opts.grokMemory = opts.grokMemory;
   }
 
-  stop(): void {
+  stop(keepLocks = false): void {
     this.stopped = true;
     if (this.restartTimer) {
       clearTimeout(this.restartTimer);
       this.restartTimer = undefined;
     }
-    void this.killCurrent();
+    void this.killCurrent(keepLocks);
   }
 
   async stopAndWait(): Promise<void> {
@@ -716,11 +722,23 @@ export class GrokClient extends EventEmitter {
     await this.start(true);
   }
 
-  private killCurrent(): Promise<void> {
+  private killCurrent(keepLocks = false): Promise<void> {
     const proc = this.proc;
     this.proc = undefined;
     this.transport = undefined;
-    this.failAllPending(new Error("grok agent is restarting"));
+    // A real shutdown must not settle the running turns: finishPrompt deletes
+    // the lock, and the next process then cannot tell the turn was cut off.
+    // Pull those prompts out of `pending` before the exit handler settles it.
+    if (keepLocks) {
+      for (const [id, p] of this.pending) {
+        if (p.sessionId && this.running.has(p.sessionId)) {
+          this.preserved.add(p.sessionId);
+          p.cleanup();
+          this.pending.delete(id);
+        }
+      }
+    }
+    if (!keepLocks) this.failAllPending(new Error("grok agent is restarting"));
     if (!proc || proc.exitCode !== null || proc.signalCode !== null) {
       return Promise.resolve();
     }
@@ -978,7 +996,7 @@ export class GrokClient extends EventEmitter {
   /** The user's message with bot-added decorations (progress directive, a
    *  leading reasoning directive, fork/priming preamble) removed, for a clean log. */
   private cleanUserText(content: ContentBlock[]): string {
-    let t = this.visibleText(content);
+    let t = stripBodyFormatDirective(this.visibleText(content));
     // Strip the bot-injected image-output appendix from the logged user text.
     const ii = t.indexOf(IMAGE_OUTPUT_DIRECTIVE);
     if (ii !== -1) t = t.slice(0, ii).trimEnd();

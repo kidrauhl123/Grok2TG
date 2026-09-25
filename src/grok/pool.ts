@@ -208,11 +208,13 @@ export class GrokPool extends EventEmitter {
     if (notifyRestarted) client.emit("restarted");
   }
 
-  /** Bot shutdown: stop every agent and the reaper. */
-  stop(): void {
+  /** Bot shutdown: stop every agent and the reaper.
+   *  A real shutdown leaves in-flight turns unsettled, so their lock files stay
+   *  and the next process resumes them. A grok restart still settles them. */
+  stop(keepLocks = false): void {
     this.stopped = true;
     clearInterval(this.reapTimer);
-    for (const c of this.liveClients()) c.stop();
+    for (const c of this.liveClients()) c.stop(keepLocks);
     this.bySession.clear();
     this.spare = undefined;
   }

@@ -13,9 +13,10 @@
 import type { Api } from "grammy";
 import { chunkMarkdown } from "../render/chunk.js";
 import { toTelegramMarkdown } from "../render/markdown.js";
+import { renderProcessBlock, PROCESS_DONE_SUMMARY } from "../render/process-block.js";
 import { stripProgressMarkers } from "../render/progress.js";
 import { stripTelegramActionFences } from "../render/telegram-bridge.js";
-import { safeEdit, safeSend } from "../bot/telegram-io.js";
+import { safeEdit, safeEditRich, safeSend, safeSendRich } from "../bot/telegram-io.js";
 import { outboundThreadExtra } from "../forum/thread.js";
 
 const SOFT_LIMIT = 3500;
@@ -99,6 +100,10 @@ export class ResponseStreamer {
   private answerBuf = "";
   /** True once a thought or tool card was written into the live bubble. */
   private processPainted = false;
+  /** The live bubble went out as a rich message, so it can be collapsed. */
+  private richLive = false;
+  /** When the process bubble was first sent. The collapsed title shows the seconds since. */
+  private processSentAt = 0;
   /** In-flight flush, so a final flush can wait instead of dropping the tail. */
   private flushDone: Promise<void> = Promise.resolve();
 
@@ -143,7 +148,7 @@ export class ResponseStreamer {
       try {
         if (this.closed || this.liveId !== undefined) return;
         const rendered = toTelegramMarkdown(src);
-        this.liveId = await safeSend(this.api, this.chatId, rendered, src, this.replyExtra(true));
+        this.liveId = await safeSend(this.api, this.chatId, rendered, src, this.replyExtra(false));
       } finally {
         this.ensureSurfaceInflight = undefined;
       }
@@ -335,6 +340,25 @@ export class ResponseStreamer {
     }
   }
 
+  /**
+   * Close the process block. The same message is rewritten without `open`, so
+   * only the summary line stays visible. A bubble that never went out as rich
+   * text has nothing to close.
+   */
+  async collapse(tokens?: number): Promise<void> {
+    if (!this.richLive || this.liveId === undefined) return;
+    const live = this.segs.slice(this.sealedIdx).filter((s) => s.kind !== "out");
+    const base = this.captureProgress(renderSegs(live));
+    const parts: string[] = [];
+    if (base.trim()) parts.push(base);
+    if (!this.proseOnly && this.planMarkdown) parts.push(this.planMarkdown);
+    if (parts.length === 0) return;
+    const elapsed = Math.max(1, Math.round((Date.now() - (this.processSentAt || Date.now())) / 1000));
+    const usage = tokens && tokens > 0 ? ` · ${tokens.toLocaleString("en-US")} tokens` : "";
+    const block = renderProcessBlock(parts.join("\n\n"), false, `${PROCESS_DONE_SUMMARY} ${elapsed}s${usage}`);
+    await safeEditRich(this.api, this.chatId, this.liveId, block.html);
+  }
+
   // ── internals ──────────────────────────────────────────────────────────────
 
   private merge(kind: SegKind, text: string): void {
@@ -385,7 +409,10 @@ export class ResponseStreamer {
     this.flushing = true;
     this.dirty = false;
     try {
-      await this.sealOverflow(final);
+      // A rich process bubble is one message and stays one message. Splitting it
+      // seals the head as plain text and drops the live id, so later tool lines
+      // never reach the bubble the user is looking at.
+      if (!this.richLive) await this.sealOverflow(final);
       // The answer is not in these segments. It is sent once, after the turn.
       const liveSegs = this.segs.slice(this.sealedIdx).filter((s) => s.kind !== "out");
       const base = this.captureProgress(renderSegs(liveSegs));
@@ -402,24 +429,24 @@ export class ResponseStreamer {
       if (!this.proseOnly && this.planMarkdown) parts.push(this.planMarkdown);
       if (this.livenessLine) parts.push(this.livenessLine);
       if (parts.length === 0) return;
-      const src = `${parts.join("\n\n")}${this.footerSuffix()}`;
-      const rendered = toTelegramMarkdown(src);
-      const chunks = chunkMarkdown(rendered);
-      const plain = chunkMarkdown(src);
-      if (chunks.length <= 1) {
-        const mdv2 = chunks[0] ?? rendered;
-        if (this.liveId === undefined) this.liveId = await safeSend(this.api, this.chatId, mdv2, src, this.replyExtra(liveReply));
-        else await safeEdit(this.api, this.chatId, this.liveId, mdv2, src);
-      } else {
-        // Remainder no longer fits one message: flush all, last stays live.
-        for (let i = 0; i < chunks.length; i++) {
-          const mdv2 = chunks[i]!;
-          const p = plain[i] ?? mdv2;
-          if (i === 0 && this.liveId !== undefined) await safeEdit(this.api, this.chatId, this.liveId, mdv2, p);
-          else if (i < chunks.length - 1) await safeSend(this.api, this.chatId, mdv2, p, this.replyExtra(liveReply));
-          else this.liveId = await safeSend(this.api, this.chatId, mdv2, p, this.replyExtra(liveReply));
+      // One rich message for the whole bubble. Open while the turn runs, so the
+      // thinking and the tools stay readable; collapse() closes it at the end.
+      const block = renderProcessBlock(parts.join("\n\n"), true);
+      if (this.liveId === undefined) {
+        this.liveId = await safeSendRich(this.api, this.chatId, block.html, this.replyExtra(false));
+        if (this.liveId !== undefined) {
+          this.richLive = true;
+          this.processSentAt = Date.now();
         }
-        this.sealedIdx = this.segs.length; // everything before the live tail is sealed
+      } else if (this.richLive) {
+        await safeEditRich(this.api, this.chatId, this.liveId, block.html);
+      }
+      if (this.liveId === undefined) {
+        // Rich delivery was rejected. Keep the bubble as plain text rather than
+        // dropping the turn's process.
+        const src = `${parts.join("\n\n")}${this.footerSuffix()}`;
+        const rendered = toTelegramMarkdown(src);
+        this.liveId = await safeSend(this.api, this.chatId, rendered, src, this.replyExtra(false));
       }
     } finally {
       this.flushing = false;
@@ -471,9 +498,8 @@ export class ResponseStreamer {
     const base = this.captureProgress(renderSegs(slice.filter((s) => s.kind !== "out")));
     if (!base.trim()) return;
     this.processPainted = true;
-    // A sealed process bubble stays, and it quotes the user so the thinking
-    // and tool cards sit on the same message as the question.
-    const reply = this.replyTo !== undefined && slice.some((s) => s.kind !== "out");
+    // A sealed process bubble stays, but it does not quote the user. Only the
+    // finished answer quotes the question.
     const src = `${base}${this.footerSuffix()}`;
     const chunks = chunkMarkdown(toTelegramMarkdown(src));
     const plain = chunkMarkdown(src);
@@ -481,7 +507,7 @@ export class ResponseStreamer {
       const mdv2 = chunks[i]!;
       const p = plain[i] ?? mdv2;
       if (i === 0 && this.liveId !== undefined) await safeEdit(this.api, this.chatId, this.liveId, mdv2, p);
-      else await safeSend(this.api, this.chatId, mdv2, p, this.replyExtra(reply));
+      else await safeSend(this.api, this.chatId, mdv2, p, this.replyExtra(false));
     }
   }
 }
@@ -544,12 +570,13 @@ function renderSegs(segs: Seg[]): string {
 function formatThought(text: string): string {
   const t = text.trim();
   if (!t) return "";
-  // Fence markers and half-open emphasis break MarkdownV2 of the live bubble.
-  // The words themselves are kept in full.
+  // The process bubble is rich HTML now, so a fenced block renders as code
+  // instead of being flattened. Half-open emphasis still has no tag, so it goes.
   const safe = t
+    .replace(/```[^\n]*\n([\s\S]*?)```/g, (_m, body: string) => `\n\n\u0000CODE${body.replace(/\s+$/g, "")}\u0000\n\n`)
     .replace(/```+/g, "'''")
     .replace(/\*\*/g, "")
     .replace(/__/g, "")
     .replace(/~~/g, "");
-  return `\u{1F9E0} ${safe}`;
+  return `🧠 ${safe}`;
 }

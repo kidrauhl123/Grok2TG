@@ -271,6 +271,8 @@ export class SessionRuntime {
   private stagedReportBack: ReportBackMeta | undefined;
   /** Last credits total reported for this session (for per-turn delta accounting). */
   private lastReportedCredits = 0;
+  /** Last token total reported for this session, so the title shows this turn only. */
+  private lastReportedTokens = 0;
   /** Live "what is happening now" line while a turn is in flight (tools/plan). */
   private liveStep: string | undefined;
   /**
@@ -289,6 +291,8 @@ export class SessionRuntime {
   /** Body and tool calls in arrival order, so narration before a tool call
    *  can be sent as its own message and only the last body stays the answer. */
   private turnParts: TurnPart[] = [];
+  /** How many narration segments were already sent as the tools appeared. */
+  private narrationSent = 0;
   /** The finished answer was already sent, so a later error path does not send it again. */
   private answerPublished = false;
   /** Quiet meta capture (suggestions) — never stream to Telegram. */
@@ -734,6 +738,7 @@ export class SessionRuntime {
     this.projectName = projectName;
     this.turnCount = 0;
     this.lastReportedCredits = 0;
+    this.lastReportedTokens = 0;
     this.liveStep = undefined;
     this.sessionComment = undefined;
     this.cardUserPrompt = undefined;
@@ -1185,6 +1190,7 @@ export class SessionRuntime {
     this.turnUserText = input.text;
     this.turnAssistantText = "";
     this.turnParts = [];
+    this.narrationSent = 0;
     this.answerPublished = false;
     this.cardThinking = "";
     this.turnExpectDone = false;
@@ -1340,6 +1346,7 @@ export class SessionRuntime {
       const streamedOutput = this.streamer?.hasOutput ?? false;
       if (this.streamer) await this.streamer.finalize();
       await this.publishFinishedAnswer();
+      await this.streamer?.collapse(this.turnTokenDelta());
       if (this.foreground) await this.sendTurnImages();
 
       // Telegram bridge actions (JSON fences in the agent reply). Process on
@@ -1610,6 +1617,7 @@ export class SessionRuntime {
       // Unexpected failure outside the prompt path (e.g. while finalizing).
       await this.streamer?.finalize().catch(() => {});
       await this.publishFinishedAnswer().catch(() => {});
+      await this.streamer?.collapse(this.turnTokenDelta()).catch(() => {});
       const errMsg = (err as Error).message;
       this.persistCardUserPrompt();
       this.cardThinking = "";
@@ -2262,6 +2270,15 @@ export class SessionRuntime {
     const s = batch[index];
     if (!s) return undefined;
     return s.text;
+  }
+
+  /** Tokens spent since the previous turn, or undefined when Grok did not report any. */
+  private turnTokenDelta(): number | undefined {
+    const total = this.contextInfo()?.totalTokens;
+    if (typeof total !== "number" || !Number.isFinite(total)) return undefined;
+    const delta = total - this.lastReportedTokens;
+    this.lastReportedTokens = total;
+    return delta > 0 ? delta : undefined;
   }
 
   /** Attribute a finished turn's credits/context to the active saved account. */
@@ -3053,7 +3070,12 @@ export class SessionRuntime {
     // completion message still reports what changed / which images were made).
     if (kind === "tool_call" || kind === "tool_call_update") {
       const last = this.turnParts.at(-1);
-      if (!last || last.kind !== "tool") this.turnParts.push({ kind: "tool" });
+      if (!last || last.kind !== "tool") {
+        this.turnParts.push({ kind: "tool" });
+        // Body written before this tool is narration. Send it now, not with
+        // the final answer at the end of the turn.
+        if (this.foreground && this.streamer) void this.flushNarration();
+      }
       // Merge early so background live-step + file ops use full title/args.
       const tid = update.toolCallId || "";
       const mergedEarly = mergeToolSnapshot(tid ? this.toolCallCache.get(tid) : undefined, update);
@@ -3124,8 +3146,6 @@ export class SessionRuntime {
     if (kind === "tool_call" || kind === "tool_call_update") {
       if (!this.cfg.showToolCalls) return;
       const id = update.toolCallId || "";
-
-      // Snapshot already merged above for file-ops / live step.
       const merged = (id && this.toolCallCache.get(id)) || mergeToolSnapshot(undefined, update);
 
       // Hermes "all": one line when the call starts. Later output does not rewrite it.
@@ -3171,6 +3191,28 @@ export class SessionRuntime {
    * On failure, retries once truncated (~3500) without reply_markup so a long
    * Done / markup error cannot silently drop the completion ping.
    */
+  /**
+   * Send narration that is already complete: body written before a tool call.
+   * Called when the tool appears, so it does not wait for the final answer.
+   */
+  private async flushNarration(): Promise<void> {
+    const clean = (text: string): string =>
+      stripProgressMarkers(stripTelegramActionFences(text)).trim();
+    const { process } = splitBodySegments(
+      this.turnParts.map((part) =>
+        part.kind === "body" ? { kind: "body", text: clean(part.text) } : part,
+      ),
+    );
+    const pending = process.slice(this.narrationSent);
+    if (pending.length === 0) return;
+    this.narrationSent = process.length;
+    const extra: Record<string, unknown> = { ...outboundThreadExtra(this.messageThreadId) };
+    for (const segment of pending) {
+      const id = await sendFinishedBody(this.api, this.chatId, segment, this.richMessages, extra);
+      if (id !== undefined && this.sessionId) this.onTelegramMessageBound?.(id, this.sessionId);
+    }
+  }
+
   /** Remember answer text that did not arrive as an agent_message_chunk. */
   private noteAnswerText(text: string | undefined): void {
     const next = text?.trim();
@@ -3195,13 +3237,14 @@ export class SessionRuntime {
         part.kind === "body" ? { kind: "body", text: clean(part.text) } : part,
       ),
     );
-    if (!answer && process.length === 0) return;
+    const pending = process.slice(this.narrationSent);
+    if (!answer && pending.length === 0) return;
     this.answerPublished = true;
     const extra: Record<string, unknown> = { ...outboundThreadExtra(this.messageThreadId) };
     if (this.turnReplyTo !== undefined) {
       extra.reply_parameters = { message_id: this.turnReplyTo, allow_sending_without_reply: true };
     }
-    for (const segment of process) {
+    for (const segment of pending) {
       const id = await sendFinishedBody(this.api, this.chatId, segment, this.richMessages, extra);
       if (id !== undefined && this.sessionId) this.onTelegramMessageBound?.(id, this.sessionId);
     }

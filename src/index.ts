@@ -19,6 +19,7 @@ import { GrokPool } from "./grok/pool.js";
 import { createBot } from "./bot/bot.js";
 import { CANONICAL_DIR, loadConfig } from "./config.js";
 import { InstanceLock } from "./app/instance-lock.js";
+import { coldBootQueueLog, dropPendingOnStart } from "./app/cold-boot-queue.js";
 import {
   isIntentionalShutdown,
   markIntentionalShutdown,
@@ -215,7 +216,7 @@ async function main(): Promise<void> {
       /* ignore */
     }
     void bot!.stop().catch(() => {});
-    pool.stop();
+    pool.stop(true);
     lock.release();
     setTimeout(() => process.exit(code), 500);
   };
@@ -284,10 +285,19 @@ async function runPollingForever(
   onOnline: (username: string) => void,
 ): Promise<void> {
   let attempt = 0;
+  // How many times polling has actually started in this process. Zero means
+  // the process just came up (drop the offline queue); anything after that is
+  // the poller recovering, so the queue is kept. Separate from `attempt`,
+  // which only counts failures and resets on a clean start.
+  let starts = 0;
   while (!isShuttingDown()) {
     try {
+      const dropPending = dropPendingOnStart(starts);
+      log.info(coldBootQueueLog(dropPending));
+      starts++;
       attempt = 0;
       await bot.start({
+        drop_pending_updates: dropPending,
         onStart: (info) => {
           onOnline(info.username);
           log.info(`bot online as @${info.username}`);

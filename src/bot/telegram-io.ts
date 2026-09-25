@@ -4,6 +4,7 @@
  */
 import { type Api, GrammyError } from "grammy";
 import { createLogger } from "../logger.js";
+import { convertTablesToBullets, needsRichRendering, richDetailsContainMath } from "../render/body-format.js";
 import { chunkMarkdown } from "../render/chunk.js";
 import { toTelegramMarkdown } from "../render/markdown.js";
 
@@ -129,6 +130,46 @@ export async function safeSend(
   }
 }
 
+const RICH_MESSAGE_MAX = 32_768;
+
+/**
+ * Send the finished answer once.
+ * Rich on does not mean every reply is rich. Ordinary MarkdownV2 stays
+ * MarkdownV2. `sendRichMessage` is used only when the text contains a pipe
+ * table, a task list, `<details>`, or `$$` block math, and it fits the cap.
+ * Math nested in `<details>` skips rich (Telegram Desktop crash). A rejection
+ * falls through to MarkdownV2, with pipe tables rewritten. Never both.
+ */
+export async function sendFinishedBody(
+  api: Api,
+  chatId: number,
+  markdown: string,
+  rich: boolean,
+  extra: Record<string, unknown> = {},
+): Promise<number | undefined> {
+  const text = markdown.trim();
+  if (!text) return undefined;
+  if (
+    rich &&
+    text.length <= RICH_MESSAGE_MAX &&
+    needsRichRendering(text) &&
+    !richDetailsContainMath(text)
+  ) {
+    const id = await sendRichMarkdown(api, chatId, text, extra);
+    if (id !== undefined) return id;
+  }
+  const src = convertTablesToBullets(text);
+  const rendered = toTelegramMarkdown(src);
+  const chunks = chunkMarkdown(rendered);
+  const plain = chunkMarkdown(src);
+  let last: number | undefined;
+  for (let i = 0; i < chunks.length; i++) {
+    const id = await safeSend(api, chatId, chunks[i]!, plain[i] ?? src, extra);
+    if (id !== undefined) last = id;
+  }
+  return last;
+}
+
 /** Send the agent's answer as a rich message: the model's raw Markdown, untouched.
  *  Telegram renders headings, tables and task lists itself. Tool cards and
  *  thinking stay on the MarkdownV2 path. */
@@ -150,6 +191,47 @@ export async function sendRichMarkdown(
   } catch (err) {
     log.warn("sendRichMessage failed:", (err as Error).message);
     return undefined;
+  }
+}
+
+/** Send the process bubble as one rich message. HTML, not Markdown: the
+ *  collapsible block has no Markdown form. Returns undefined on rejection so
+ *  the caller can fall back to plain text. */
+export async function safeSendRich(
+  api: Api,
+  chatId: number,
+  html: string,
+  extra: Record<string, unknown> = {},
+): Promise<number | undefined> {
+  // No remove_keyboard here. A rich message sent with it can never be edited
+  // afterwards ("message can't be edited"), and this bubble is rewritten on
+  // every thought and tool line.
+  try {
+    const msg = await withRetry(() =>
+      api.sendRichMessage(chatId, { html }, { ...extra }),
+    );
+    return msg.message_id;
+  } catch (err) {
+    log.warn("sendRichMessage failed:", (err as Error).message);
+    return undefined;
+  }
+}
+
+/** Rewrite a rich message in place. An object maps to `rich_message`, so the
+ *  same bubble can go from open to collapsed without a new message. */
+export async function safeEditRich(
+  api: Api,
+  chatId: number,
+  messageId: number,
+  html: string,
+): Promise<boolean> {
+  try {
+    await withRetry(() => api.editMessageText(chatId, messageId, { html }));
+    return true;
+  } catch (err) {
+    if (isNotModified(err)) return true;
+    log.debug("rich edit failed:", (err as Error).message);
+    return false;
   }
 }
 
